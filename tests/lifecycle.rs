@@ -743,12 +743,19 @@ fn a_successful_open_keeps_its_claim_when_the_reply_is_malformed() {
         "subagent-start",
         &fixture.input("child", "SubagentStart").to_string(),
     ));
-    wait_until(|| !fixture.calls().is_empty());
+    let opens = |fixture: &Fixture| {
+        fixture
+            .calls()
+            .iter()
+            .filter(|args| args[0] == "plugin")
+            .count()
+    };
+    wait_until(|| opens(&fixture) == 1);
     assert_silent_success(
         &fixture.hook("subagent-start", &fixture.input("child", "SubagentStart")),
     );
     thread::sleep(Duration::from_millis(150));
-    assert_eq!(fixture.calls().len(), 1);
+    assert_eq!(opens(&fixture), 1);
     assert!(fixture.child_dir("child").join("open.lock").exists());
 }
 

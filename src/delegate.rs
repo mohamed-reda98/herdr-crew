@@ -1,7 +1,7 @@
 use crate::{
     codex, hooks, naming, pane, process, run as run_files,
     state::{self, Child, Delegate, DelegateRun, Kind, Reporting},
-    supervise, Result,
+    summary, supervise, Result,
 };
 use std::{
     env,
@@ -261,10 +261,7 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
     let reporting = Reporting {
         run_id,
         pane: pane_id,
-        source: env::var("HERDR_REPORT_SOURCE")
-            .ok()
-            .filter(|source| !source.is_empty())
-            .unwrap_or_else(|| "herdr-crew".to_owned()),
+        source: pane::source(),
         agent,
         lifecycle,
     };
@@ -275,7 +272,7 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
     let mut child = match relay.command(&args).spawn() {
         Ok(child) => child,
         Err(error) => {
-            supervise::clear_state(&reporting);
+            summary::ended(&reporting);
             eprintln!("herdr-crew: could not run {:?}: {error}", relay.interpreter);
             return Ok(127);
         }
@@ -301,6 +298,11 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
             if delegate.orchestrator.is_some() {
                 let _ = supervise::spawn("delegate-guard", &run_dir);
             }
+            summary::started(
+                &reporting.pane,
+                &reporting.source,
+                &summary::Member::delegate(&run_dir, request.kind),
+            );
         }
     }
 
@@ -342,7 +344,7 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
         let _ = watchdog.kill();
         let _ = watchdog.wait();
     }
-    supervise::clear_state(&reporting);
+    summary::ended(&reporting);
     Ok(status
         .code()
         .or_else(|| status.signal().map(|signal| 128 + signal))
