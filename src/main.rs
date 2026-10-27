@@ -1,5 +1,6 @@
 mod hooks;
 mod install;
+mod process;
 mod render;
 mod state;
 mod transcript;

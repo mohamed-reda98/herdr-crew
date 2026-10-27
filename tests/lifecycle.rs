@@ -227,6 +227,33 @@ fn finish(fixture: &Fixture, agent: &str) {
     wait_until(|| fixture.child_dir(agent).join("stop.json").exists());
 }
 
+fn start_conversation(fixture: &Fixture, agent: &str) {
+    fixture.prepare_child(agent);
+    append(
+        &fixture.transcript(agent),
+        line(agent, "user", json!("A brief")).as_bytes(),
+    );
+}
+
+fn stop_with(fixture: &Fixture, agent: &str, message: Option<&str>) {
+    let mut stop = fixture.input(agent, "SubagentStop");
+    if let Some(message) = message {
+        stop["last_assistant_message"] = json!(message);
+    }
+    assert_silent_success(&fixture.hook("subagent-stop", &stop));
+    wait_until(|| fixture.child_dir(agent).join("stop.json").exists());
+}
+
+fn start_time(pid: u32) -> u64 {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    stat[stat.rfind(')').unwrap() + 1..]
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
 #[test]
 fn start_opens_a_tab_without_focus_and_does_not_wait_for_herdr() {
     let fixture = Fixture::new();
@@ -732,11 +759,12 @@ fn stop_closes_a_view_even_if_the_transcript_never_appears() {
     let mut view = fixture.view("child");
     let mut stop = fixture.input("child", "SubagentStop");
     stop["agent_transcript_path"] = json!("");
-    stop["last_assistant_message"] = json!("This final report must not be rendered");
+    stop["last_assistant_message"] = json!("The report from the stop hook");
     stop["stop_hook_active"] = json!(false);
     assert_silent_success(&fixture.hook("subagent-stop", &stop));
     view.expect_exit();
-    assert_eq!(view.text(), "");
+    assert!(view.text().contains("status: completed"));
+    assert!(view.text().contains("The report from the stop hook"));
 }
 
 #[test]
@@ -781,4 +809,191 @@ fn state_uses_xdg_then_home_and_creates_private_records() {
             .count()
             == 2
     });
+}
+
+#[test]
+fn completed_child_shows_the_stop_hook_report_after_the_steps() {
+    let fixture = Fixture::new();
+    start_conversation(&fixture, "child");
+    append(
+        &fixture.transcript("child"),
+        line(
+            "child",
+            "assistant",
+            json!([{"type":"text", "text":"Conversation text"}]),
+        )
+        .as_bytes(),
+    );
+    let mut view = fixture.view("child");
+    view.expect("Conversation text");
+    let long = format!("Final report\n{}\x1b[31mtail", "x".repeat(10_000));
+    stop_with(&fixture, "child", Some(&long));
+    view.expect_exit();
+    let text = view.text();
+    assert!(text.rfind("Conversation text").unwrap() < text.find("status: completed").unwrap());
+    assert!(text.find("status: completed").unwrap() < text.find("Final report").unwrap());
+    // The stop hook's message wins over the conversation, long reports are cut, escapes are not passed on.
+    assert!(!text.contains("tail") && !text.contains('\x1b') && text.contains("…"));
+}
+
+#[test]
+fn completed_child_falls_back_to_the_conversation_for_its_report() {
+    let fixture = Fixture::new();
+    start_conversation(&fixture, "child");
+    append(
+        &fixture.transcript("child"),
+        line(
+            "child",
+            "assistant",
+            json!([
+                {"type":"tool_use", "name":"Bash", "input":{"command":"ls"}}
+            ]),
+        )
+        .as_bytes(),
+    );
+    append(
+        &fixture.transcript("child"),
+        line("child", "assistant", json!([
+            {"type":"thinking", "thinking":"Done"}, {"type":"text", "text":"Report one"}, {"type":"text", "text":"Report two"}
+        ])).as_bytes(),
+    );
+    let mut view = fixture.view("child");
+    view.expect("Report two");
+    stop_with(&fixture, "child", None);
+    view.expect_exit();
+    let text = view.text();
+    assert!(text.contains("status: completed"));
+    assert!(text.ends_with("Report one\nReport two\n"), "{text}");
+}
+
+#[test]
+fn child_that_ends_on_an_api_error_shows_failed_with_the_error() {
+    let fixture = Fixture::new();
+    start_conversation(&fixture, "child");
+    let mut error = serde_json::from_str::<Value>(&line(
+        "child",
+        "assistant",
+        json!([{"type":"text", "text":"API Error: 529 overloaded"}]),
+    ))
+    .unwrap();
+    error["isApiErrorMessage"] = json!(true);
+    append(
+        &fixture.transcript("child"),
+        format!("{error}\n").as_bytes(),
+    );
+    let mut view = fixture.view("child");
+    view.expect("API Error: 529 overloaded");
+    stop_with(&fixture, "child", Some("API Error: 529 overloaded"));
+    view.expect_exit();
+    let text = view.text();
+    assert!(text.contains("status: failed"));
+    assert!(!text.contains("status: completed"));
+}
+
+#[test]
+fn child_stopped_without_a_result_is_unknown_and_an_interrupt_is_killed() {
+    let fixture = Fixture::new();
+    start_conversation(&fixture, "empty");
+    let mut view = fixture.view("empty");
+    view.expect("A brief");
+    stop_with(&fixture, "empty", None);
+    view.expect_exit();
+    assert!(view.text().contains("status: unknown"));
+
+    start_conversation(&fixture, "stopped");
+    append(
+        &fixture.transcript("stopped"),
+        line(
+            "stopped",
+            "user",
+            json!([{"type":"text", "text":"[Request interrupted by user]"}]),
+        )
+        .as_bytes(),
+    );
+    let mut view = fixture.view("stopped");
+    view.expect("A brief");
+    stop_with(&fixture, "stopped", Some("partial"));
+    view.expect_exit();
+    assert!(view.text().contains("status: killed"));
+}
+
+#[test]
+fn view_ends_as_killed_when_the_orchestrator_is_gone_without_a_stop_record() {
+    let fixture = Fixture::new();
+    start_conversation(&fixture, "child");
+    let mut orchestrator = Command::new("sleep").arg("30").spawn().unwrap();
+    let started = start_time(orchestrator.id());
+    fs::write(
+        fixture.child_dir("child").join("child.json"),
+        json!({
+            "agent_id": "child", "agent_type": "general-purpose", "transcript": fixture.transcript("child"),
+            "orchestrator": {"pid": orchestrator.id(), "started": started}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut view = fixture.view("child");
+    view.expect("A brief");
+    thread::sleep(Duration::from_millis(1800));
+    assert!(view.child.try_wait().unwrap().is_none());
+    orchestrator.kill().unwrap();
+    orchestrator.wait().unwrap();
+    view.expect_exit();
+    assert!(view.text().contains("status: killed"));
+    assert!(!fixture.child_dir("child").join("stop.json").exists());
+}
+
+#[test]
+fn finished_metadata_without_a_stop_record_ends_the_view_as_unknown() {
+    let fixture = Fixture::new();
+    start_conversation(&fixture, "child");
+    let mut view = fixture.view("child");
+    view.expect("A brief");
+    fs::write(
+        fixture.transcript("child").with_extension("meta.json"),
+        r#"{"finished":true}"#,
+    )
+    .unwrap();
+    view.expect_exit();
+    assert!(view.text().contains("status: unknown"));
+}
+
+#[test]
+fn a_late_stop_record_beats_the_finished_metadata() {
+    let fixture = Fixture::new();
+    start_conversation(&fixture, "child");
+    let mut view = fixture.view("child");
+    view.expect("A brief");
+    fs::write(
+        fixture.transcript("child").with_extension("meta.json"),
+        r#"{"finished":true}"#,
+    )
+    .unwrap();
+    thread::sleep(Duration::from_millis(300));
+    stop_with(&fixture, "child", Some("Late report"));
+    view.expect_exit();
+    assert!(view.text().contains("status: completed"));
+}
+
+#[test]
+fn start_hook_records_the_orchestrator_and_the_stop_hook_keeps_the_report() {
+    let fixture = Fixture::new();
+    assert_silent_success(
+        &fixture.hook("subagent-start", &fixture.input("child", "SubagentStart")),
+    );
+    wait_until(|| fixture.child_dir("child").join("child.json").exists());
+    let child: Value =
+        serde_json::from_slice(&fs::read(fixture.child_dir("child").join("child.json")).unwrap())
+            .unwrap();
+    let pid = std::process::id();
+    assert_eq!(child["orchestrator"]["pid"], pid);
+    assert_eq!(child["orchestrator"]["started"], start_time(pid));
+    let mut stop = fixture.input("child", "SubagentStop");
+    stop["last_assistant_message"] = json!("é".repeat(100_000));
+    assert_silent_success(&fixture.hook("subagent-stop", &stop));
+    wait_until(|| fixture.child_dir("child").join("stop.json").exists());
+    let stop: Value =
+        serde_json::from_slice(&fs::read(fixture.child_dir("child").join("stop.json")).unwrap())
+            .unwrap();
+    assert_eq!(stop["message"].as_str().unwrap().chars().count(), 16_000);
 }

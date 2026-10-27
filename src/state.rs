@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::{process::Process, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -14,12 +14,16 @@ pub struct Child {
     pub agent_id: String,
     pub agent_type: String,
     pub transcript: PathBuf,
+    #[serde(default)]
+    pub orchestrator: Option<Process>,
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct Stop {
     pub stopped_at_ms: u64,
     pub transcript: Option<PathBuf>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 pub fn epoch_ms() -> u64 {
