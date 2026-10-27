@@ -32,6 +32,9 @@ pub struct Child {
     pub kind: Kind,
     #[serde(default)]
     pub delegate: Option<DelegateRun>,
+    /// The run id of the delegate this child was started inside, if any.
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 /// What the view of a delegate needs to know about its run.

@@ -269,7 +269,12 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
 
     forward_terminations();
     let started_ms = state::epoch_ms();
-    let mut child = match relay.command(&args).spawn() {
+    // Subagents the delegate starts fire the global hooks with this in their environment.
+    let mut child = match relay
+        .command(&args)
+        .env(hooks::PARENT_VAR, &reporting.run_id)
+        .spawn()
+    {
         Ok(child) => child,
         Err(error) => {
             summary::ended(&reporting);
@@ -378,6 +383,7 @@ fn open_view(run_dir: &Path, run_id: &str, kind: Kind, run: DelegateRun) -> Resu
             orchestrator: None,
             kind,
             delegate: Some(run),
+            parent: None,
         },
     )?;
     hooks::open_tab(run_dir, &name)

@@ -38,6 +38,16 @@ Start a subagent from Claude Code inside Herdr. A tab named `<model> <effort>: <
 tab; there is no shared tab or configured concurrency limit. Switching to a view
 does not send input to the subagent. Closing the view does not stop the subagent.
 
+A subagent started by a Claude delegate gets its view in the same workspace, named
+with a leading `↳` (`↳ sonnet-5.5 high: find ledger query`, or `↳ sub: …` before
+the model and effort are known), so it reads as a child of the delegate. It is
+otherwise a subagent view: named, followed and closed the same way. If the
+delegate's process dies before the subagent stops, its view ends as `killed`.
+`herdr-crew delegate` marks the relay's environment with `HERDR_CREW_PARENT=<run id>`,
+which the global hooks see when they fire inside the delegate and record as the
+child's `parent`. Subagents started by those subagents are still ignored, and
+nested subagents count as subs in the [sidebar summary](#sidebar-summary).
+
 ## Commands and lifecycle
 
 - `herdr-crew hook subagent-start` reads Claude Code's hook JSON from stdin and
@@ -173,7 +183,7 @@ State lives under `$XDG_STATE_HOME/herdr-crew`, defaulting to
 
 ```text
 <session_id>/<agent_id>/
-  child.json   subagent identity and transcript path
+  child.json   subagent identity, transcript path and, inside a delegate, its parent run id
   open.lock    exclusive claim preventing duplicate start hooks from opening tabs
   stop.json    stop time and optional transcript path supplied by the stop hook
 panes/<pane>/
@@ -205,6 +215,7 @@ Environment overrides:
 | `HERDR_CREW_NODE` | Interpreter for the relay; defaults to `node` |
 | `HERDR_CREW_ORCHESTRATOR_PID` | Process whose end stops a delegate; `0` turns the guard off |
 | `HERDR_CREW_KILL_GRACE` | Seconds the relay gets to stop before the leftovers are killed; defaults to `15` |
+| `HERDR_CREW_PARENT` | Set by `delegate` for the relay (the run id), read by the hooks to nest a delegate's subagents; not for users to set |
 | `HERDR_REPORT_SOURCE` | `--source` for the pane reports; defaults to `herdr-crew` |
 | `CODEX_HOME` | Where Codex's `config.toml` is read from (Codex delegates only); defaults to `~/.codex` |
 
@@ -234,6 +245,5 @@ cargo build --release
 Tests use synthetic transcripts, temporary state/settings, and a fake Herdr CLI.
 They never use live Herdr, real Claude settings, real conversations, or the
 network; delegate tests use a fake relay (`CODEX_DELEGATE_RELAY` and
-`CLAUDE_DELEGATE_RELAY` with `HERDR_CREW_NODE=/bin/sh`). Nested children (the
-subagents a Claude delegate starts) and review logic are outside this
+`CLAUDE_DELEGATE_RELAY` with `HERDR_CREW_NODE=/bin/sh`). Review logic is outside this
 implementation.

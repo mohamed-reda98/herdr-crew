@@ -23,7 +23,12 @@ struct Input {
     last_assistant_message: Option<String>,
     #[serde(default)]
     orchestrator: Option<Process>,
+    #[serde(default)]
+    parent: Option<String>,
 }
+
+/// Names the delegate run that a hook fired inside it belongs to.
+pub const PARENT_VAR: &str = "HERDR_CREW_PARENT";
 
 // The payload travels as one argument, which the kernel caps; a stop must not be lost to a long report.
 const REPORT_LIMIT: usize = 16_000;
@@ -84,6 +89,8 @@ pub fn receive(args: &[String]) -> Result<()> {
     let mut input: Input = serde_json::from_slice(&bytes)?;
     input.validate(action)?;
     input.orchestrator = crate::process::orchestrator();
+    // Set by `herdr-crew delegate` for the relay, so it is only present inside a delegate.
+    input.parent = env::var(PARENT_VAR).ok().filter(|run_id| safe_id(run_id));
     spawn_dispatch(action, &serde_json::to_string(&input)?)
 }
 
@@ -162,6 +169,7 @@ fn open_view(input: &Input, child_dir: &Path) -> Result<()> {
                 orchestrator: input.orchestrator,
                 kind: state::Kind::Subagent,
                 delegate: None,
+                parent: input.parent.clone(),
             },
         )?;
         let name = naming::tab_name(
@@ -169,6 +177,7 @@ fn open_view(input: &Input, child_dir: &Path) -> Result<()> {
             None,
             naming::read_description(&input.transcript()).as_deref(),
             &input.agent_type,
+            input.parent.is_some(),
         );
         open_tab(child_dir, &name)
     })();

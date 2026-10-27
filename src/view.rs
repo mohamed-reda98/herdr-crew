@@ -122,6 +122,7 @@ pub fn run() -> Result<()> {
             &child_dir,
             ClaudeTranscript::new(child.transcript, child.agent_id),
             &child.agent_type,
+            child.parent.is_some(),
             child.orchestrator,
             renderer,
             linger,
@@ -163,6 +164,7 @@ fn follow_subagent(
     child_dir: &Path,
     mut source: ClaudeTranscript,
     agent_type: &str,
+    nested: bool,
     orchestrator: Option<process::Process>,
     mut renderer: Renderer<io::Stdout>,
     linger: Duration,
@@ -189,6 +191,7 @@ fn follow_subagent(
                 source.effort(),
                 source.description(),
                 agent_type,
+                nested,
             )
         });
         if let Some(stop) = stop {

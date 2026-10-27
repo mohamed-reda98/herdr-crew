@@ -39,6 +39,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -n "$FAKE_PIDFILE" ] && echo $$ > "$FAKE_PIDFILE"
+[ -n "$FAKE_PARENT_FILE" ] && echo "${HERDR_CREW_PARENT-unset}" > "$FAKE_PARENT_FILE"
 write_result() {
     printf '{"status":"%s","exitCode":%s,"model":%s,"effort":%s,"finalMessage":"%s","error":%s}\n' \
         "$1" "${FAKE_EXIT:-0}" "${FAKE_MODEL_JSON:-null}" "${FAKE_EFFORT_JSON:-null}" \
@@ -466,6 +467,52 @@ fn only_codex_and_claude_are_delegates_and_a_missing_agent_is_explained() {
         assert!(finished.stderr.contains("--agent requires a value"));
     }
     assert!(!fixture.path("herdr.log").exists());
+}
+
+#[test]
+fn the_relay_is_told_its_run_id_so_subagents_it_starts_know_their_delegate() {
+    for agent in ["claude", "codex"] {
+        let fixture = Fixture::new();
+        let brief = fixture.brief("Do the thing");
+        let seen = fixture.path("parent.txt");
+        let finished = fixture.run(
+            &["--agent", agent, "--brief", &brief],
+            &[("FAKE_PARENT_FILE", seen.to_str().unwrap())],
+        );
+        assert_eq!(finished.code, Some(0));
+        let run_id = fixture
+            .run_dir()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(fs::read_to_string(&seen).unwrap(), format!("{run_id}\n"));
+    }
+}
+
+#[test]
+fn outside_herdr_the_relay_is_not_given_a_parent() {
+    let fixture = Fixture::new();
+    let brief = fixture.brief("Do the thing");
+    let seen = fixture.path("parent.txt");
+    let out = fixture.path("out");
+    let finished = fixture.run(
+        &[
+            "--agent",
+            "claude",
+            "--brief",
+            &brief,
+            "--out-dir",
+            out.to_str().unwrap(),
+        ],
+        &[
+            ("HERDR_ENV", "0"),
+            ("FAKE_PARENT_FILE", seen.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(finished.code, Some(0));
+    assert_eq!(fs::read_to_string(&seen).unwrap(), "unset\n");
 }
 
 #[test]

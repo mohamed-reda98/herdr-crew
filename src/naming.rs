@@ -5,6 +5,7 @@ use std::{
 };
 
 const TASK_WORDS: usize = 3;
+const NESTED_MARK: &str = "↳";
 const PART_WIDTH: usize = 80;
 
 /// `claude-opus-5-5` -> `opus-5.5`; ids that are not `claude-*` are kept as they are.
@@ -50,18 +51,25 @@ fn is_version_part(part: &str) -> bool {
     (1..=2).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// `<model> <effort>: <task>`, dropping whatever is unknown without leaving gaps.
+/// `<model> <effort>: <task>`, dropping whatever is unknown without leaving gaps. A subagent of
+/// a delegate (`nested`) reads as the delegate's child with a leading `↳`.
 pub fn tab_name(
     model: Option<&str>,
     effort: Option<&str>,
     description: Option<&str>,
     agent_type: &str,
+    nested: bool,
 ) -> String {
     let task = description
         .map(first_words)
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| clean(agent_type));
-    compose(model, effort, &task, "sub")
+    let name = compose(model, effort, &task, "sub");
+    if nested {
+        format!("{NESTED_MARK} {name}")
+    } else {
+        name
+    }
 }
 
 /// A delegate's name: the title as given, else the first words of its brief. `agent` stands in
@@ -228,7 +236,7 @@ mod tests {
     #[test]
     fn names_cut_the_task_and_fill_gaps() {
         let name = |model, effort, description, agent_type| {
-            tab_name(model, effort, description, agent_type)
+            tab_name(model, effort, description, agent_type, false)
         };
         assert_eq!(
             name(
@@ -281,5 +289,19 @@ mod tests {
             "opus-5.5 high"
         );
         assert_eq!(name(Some(""), None, None, "x"), "sub: x");
+        assert_eq!(
+            tab_name(
+                Some("claude-sonnet-5-5"),
+                Some("high"),
+                Some("find ledger query now"),
+                "x",
+                true
+            ),
+            "↳ sonnet-5.5 high: find ledger query"
+        );
+        assert_eq!(
+            tab_name(None, None, None, "Explore", true),
+            "↳ sub: Explore"
+        );
     }
 }

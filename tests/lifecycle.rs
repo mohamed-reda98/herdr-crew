@@ -1053,6 +1053,107 @@ fn child_stopped_without_a_result_is_unknown_and_an_interrupt_is_killed() {
     assert!(view.text().contains("status: killed"));
 }
 
+fn nested_start(fixture: &Fixture, agent: &str, parent: Option<&str>) {
+    let mut command = fixture.command();
+    if let Some(parent) = parent {
+        command.env("HERDR_CREW_PARENT", parent);
+    }
+    let output = invoke_hook(
+        command,
+        "subagent-start",
+        &fixture.input(agent, "SubagentStart").to_string(),
+    );
+    assert_silent_success(&output);
+    wait_until(|| fixture.child_dir(agent).join("tab.json").exists());
+}
+
+#[test]
+fn a_subagent_of_a_delegate_opens_in_the_same_workspace_with_a_nested_name_that_follows_its_details(
+) {
+    let fixture = Fixture::new();
+    let transcript = fixture.transcript("child");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(
+        transcript.with_extension("meta.json"),
+        json!({"agentType":"general-purpose", "description":"find ledger query"}).to_string(),
+    )
+    .unwrap();
+    nested_start(&fixture, "child", Some("run-1"));
+    let open = fixture
+        .calls()
+        .into_iter()
+        .find(|args| args[..3] == ["plugin", "pane", "open"])
+        .unwrap();
+    let at = open.iter().position(|arg| arg == "--workspace").unwrap();
+    assert_eq!(open[at + 1], "w1D");
+    assert_eq!(renames(&fixture), ["↳ sub: find ledger query"]);
+    let recorded: Value =
+        serde_json::from_slice(&fs::read(fixture.child_dir("child").join("child.json")).unwrap())
+            .unwrap();
+    assert_eq!(recorded["parent"], "run-1");
+
+    let view = fixture.view("child");
+    append(
+        &transcript,
+        line("child", "user", json!("Synthetic brief")).as_bytes(),
+    );
+    view.expect("Synthetic brief");
+    append(
+        &transcript,
+        assistant(
+            "child",
+            json!({"effort":"high", "message":{"model":"claude-sonnet-5-5",
+                "content":[{"type":"text", "text":"A step"}]}}),
+        )
+        .as_bytes(),
+    );
+    wait_until(|| renames(&fixture).len() == 2);
+    assert!(renames(&fixture).contains(&"↳ sonnet-5.5 high: find ledger query".to_owned()));
+    // It ends like any other view.
+    finish(&fixture, "child");
+    let mut view = view;
+    view.expect_exit();
+    assert!(view.text().contains("status:"));
+}
+
+#[test]
+fn without_a_parent_the_name_has_no_mark_and_an_unsafe_parent_is_ignored() {
+    for parent in [None, Some(""), Some("../escape")] {
+        let fixture = Fixture::new();
+        nested_start(&fixture, "child", parent);
+        assert_eq!(renames(&fixture), ["sub: general-purpose"]);
+        let recorded: Value = serde_json::from_slice(
+            &fs::read(fixture.child_dir("child").join("child.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(recorded["parent"].is_null());
+    }
+}
+
+#[test]
+fn a_nested_view_ends_as_killed_when_its_delegate_dies_without_a_stop() {
+    let fixture = Fixture::new();
+    start_conversation(&fixture, "child");
+    let mut delegate = Command::new("sleep").arg("30").spawn().unwrap();
+    let started = start_time(delegate.id());
+    fs::write(
+        fixture.child_dir("child").join("child.json"),
+        json!({
+            "agent_id": "child", "agent_type": "general-purpose", "transcript": fixture.transcript("child"),
+            "orchestrator": {"pid": delegate.id(), "started": started}, "parent": "run-1"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut view = fixture.view("child");
+    view.expect("A brief");
+    delegate.kill().unwrap();
+    delegate.wait().unwrap();
+    view.expect_exit();
+    assert!(view.text().contains("status: killed"));
+    assert!(!fixture.child_dir("child").join("stop.json").exists());
+}
+
 #[test]
 fn view_ends_as_killed_when_the_orchestrator_is_gone_without_a_stop_record() {
     let fixture = Fixture::new();
