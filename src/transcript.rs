@@ -1,19 +1,18 @@
 use crate::{
     naming, state,
+    tail::Tail,
     view::{Ending, Step, StepKind, StepSource, Update},
 };
 use serde_json::Value;
 use std::{
-    fs::File,
-    io::{self, BufRead, BufReader},
+    io,
     path::{Path, PathBuf},
 };
 
 pub struct ClaudeTranscript {
     path: PathBuf,
     agent_id: String,
-    reader: Option<BufReader<File>>,
-    pending: Vec<u8>,
+    tail: Tail,
     brief_seen: bool,
     model: Option<String>,
     effort: Option<String>,
@@ -24,10 +23,9 @@ pub struct ClaudeTranscript {
 impl ClaudeTranscript {
     pub fn new(path: PathBuf, agent_id: String) -> Self {
         Self {
+            tail: Tail::new(path.clone()),
             path,
             agent_id,
-            reader: None,
-            pending: Vec::new(),
             brief_seen: false,
             model: None,
             effort: None,
@@ -38,7 +36,7 @@ impl ClaudeTranscript {
 
     pub fn use_transcript(&mut self, path: &Path) {
         // A stop hook can locate a transcript that was absent at the derived path.
-        if self.reader.is_none() && path != self.path {
+        if self.tail.redirect(path) {
             self.path = path.to_owned();
         }
     }
@@ -84,17 +82,6 @@ impl ClaudeTranscript {
         }
     }
 
-    fn open(&mut self) -> io::Result<()> {
-        if self.reader.is_none() {
-            match File::open(&self.path) {
-                Ok(file) => self.reader = Some(BufReader::new(file)),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
-    }
-
     fn updates(&mut self, line: &Value) -> Vec<Update> {
         if line.get("isSidechain").and_then(Value::as_bool) != Some(true)
             || line.get("agentId").and_then(Value::as_str) != Some(&self.agent_id)
@@ -129,20 +116,11 @@ impl StepSource for ClaudeTranscript {
     }
 
     fn poll(&mut self) -> io::Result<Vec<Update>> {
-        self.open()?;
         let mut updates = Vec::new();
-        while let Some(reader) = self.reader.as_mut() {
-            if reader.read_until(b'\n', &mut self.pending)? == 0 {
-                break;
-            }
-            // EOF is temporary: a later append may complete this JSON or UTF-8 code point.
-            if self.pending.last() != Some(&b'\n') {
-                break;
-            }
-            if let Ok(line) = serde_json::from_slice::<Value>(&self.pending) {
+        for raw in self.tail.lines()? {
+            if let Ok(line) = serde_json::from_slice::<Value>(&raw) {
                 updates.extend(self.updates(&line));
             }
-            self.pending.clear();
         }
         Ok(updates)
     }

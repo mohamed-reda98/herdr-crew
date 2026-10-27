@@ -148,9 +148,17 @@ fn open_view(input: &Input, child_dir: &Path) -> Result<()> {
                 agent_type: input.agent_type.clone(),
                 transcript: input.transcript(),
                 orchestrator: input.orchestrator,
+                kind: state::Kind::Subagent,
+                delegate: None,
             },
         )?;
-        open_tab(input, child_dir)
+        let name = naming::tab_name(
+            None,
+            None,
+            naming::read_description(&input.transcript()).as_deref(),
+            &input.agent_type,
+        );
+        open_tab(child_dir, &name)
     })();
     if opened.is_err() {
         let _ = fs::remove_file(lock);
@@ -158,7 +166,7 @@ fn open_view(input: &Input, child_dir: &Path) -> Result<()> {
     opened
 }
 
-fn workspace() -> Result<String> {
+pub fn workspace() -> Result<String> {
     if let Ok(workspace) = env::var("HERDR_WORKSPACE_ID") {
         if !workspace.is_empty() {
             return Ok(workspace);
@@ -172,7 +180,8 @@ fn workspace() -> Result<String> {
         .to_owned())
 }
 
-fn open_tab(input: &Input, child_dir: &Path) -> Result<()> {
+/// Opens a view tab in the orchestrator's workspace, named `name`, for the child in `child_dir`.
+pub fn open_tab(child_dir: &Path, name: &str) -> Result<()> {
     let mut command = herdr::command();
     command.args([
         "plugin",
@@ -208,19 +217,13 @@ fn open_tab(input: &Input, child_dir: &Path) -> Result<()> {
             .pointer("/result/plugin_pane/pane/tab_id")
             .and_then(Value::as_str)
         {
-            let name = naming::tab_name(
-                None,
-                None,
-                naming::read_description(&input.transcript()).as_deref(),
-                &input.agent_type,
-            );
-            naming::rename(tab_id, &name);
+            naming::rename(tab_id, name);
             // Recorded after the rename so the view only ever renames on top of it.
             state::write_json(
                 &child_dir.join("tab.json"),
                 &state::Tab {
                     tab_id: tab_id.to_owned(),
-                    name,
+                    name: name.to_owned(),
                 },
             )?;
         }

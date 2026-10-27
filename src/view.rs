@@ -1,9 +1,10 @@
 use crate::{
-    naming::Namer, process, render::Renderer, state, transcript::ClaudeTranscript, Result,
+    codex::CodexRun, naming::Namer, process, render::Renderer, state, transcript::ClaudeTranscript,
+    Result,
 };
 use std::{
     env, io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -25,6 +26,8 @@ pub enum StepKind {
     Edit,
     Message,
     ToolResult,
+    Note,
+    Error,
 }
 
 /// How a source's conversation ended, as far as it can tell.
@@ -59,7 +62,6 @@ enum Cause {
 // A missed stop hook is only believed after the one in flight has had time to land.
 const STOP_GRACE: Duration = Duration::from_millis(1500);
 
-// Keeping the source independent lets the view follow other child formats later.
 pub trait StepSource {
     fn poll(&mut self) -> io::Result<Vec<Update>>;
     fn ending(&self) -> Option<Ending>;
@@ -89,15 +91,68 @@ pub fn run() -> Result<()> {
     let child_dir =
         PathBuf::from(env::var_os("HERDR_CREW_CHILD_DIR").ok_or("missing child directory")?);
     let child: state::Child = state::read_json(&child_dir.join("child.json"))?;
-    let mut namer = Namer::new(&child_dir, child.agent_type);
-    let mut source = ClaudeTranscript::new(child.transcript, child.agent_id);
-    let mut renderer = Renderer::new(io::stdout());
     let linger = Duration::from_millis(
         env::var("HERDR_CREW_LINGER_MS")
             .ok()
             .and_then(|raw| raw.parse().ok())
             .unwrap_or(10_000),
     );
+    let renderer = Renderer::new(io::stdout());
+    match (child.kind, child.delegate) {
+        (state::Kind::Codex, Some(run)) => {
+            follow_delegate(&child_dir, CodexRun::new(run), renderer, linger)
+        }
+        (state::Kind::Codex, None) => Err("the delegate's run record is missing".into()),
+        (state::Kind::Subagent, _) => follow_subagent(
+            &child_dir,
+            ClaudeTranscript::new(child.transcript, child.agent_id),
+            &child.agent_type,
+            child.orchestrator,
+            renderer,
+            linger,
+        ),
+    }
+}
+
+/// Follows a delegate until its run is over, which its relay's result record or exit tells.
+fn follow_delegate(
+    child_dir: &Path,
+    mut source: CodexRun,
+    mut renderer: Renderer<io::Stdout>,
+    linger: Duration,
+) -> Result<()> {
+    let mut namer = Namer::new(child_dir);
+    loop {
+        // The relay writes its result before it exits, so a relay seen gone has left it behind;
+        // observing both before draining keeps the last steps in.
+        let gone = source.relay_gone();
+        let result = source.result();
+        for update in source.poll()? {
+            renderer.write(update)?;
+        }
+        namer.refresh(|| source.tab_name());
+        if let Some(outcome) = result
+            .map(|result| source.outcome(&result))
+            .or_else(|| gone.then(|| source.outcome_without_result()))
+        {
+            renderer.result(&outcome)?;
+            thread::sleep(linger);
+            return Ok(());
+        }
+        renderer.flush()?;
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn follow_subagent(
+    child_dir: &Path,
+    mut source: ClaudeTranscript,
+    agent_type: &str,
+    orchestrator: Option<process::Process>,
+    mut renderer: Renderer<io::Stdout>,
+    linger: Duration,
+) -> Result<()> {
+    let mut namer = Namer::new(child_dir);
     let mut ended_since: Option<Instant> = None;
     loop {
         let stop = state::read_json::<state::Stop>(&child_dir.join("stop.json")).ok();
@@ -106,14 +161,21 @@ pub fn run() -> Result<()> {
         }
         // Completion must be observed before draining so its last steps are included.
         let finished = source.finished();
-        let gone = child
-            .orchestrator
+        let gone = orchestrator
             .as_ref()
             .is_some_and(|orchestrator| !process::alive(orchestrator));
         for update in source.poll()? {
             renderer.write(update)?;
         }
-        namer.refresh(&mut source);
+        namer.refresh(|| {
+            source.load_description();
+            crate::naming::tab_name(
+                source.model(),
+                source.effort(),
+                source.description(),
+                agent_type,
+            )
+        });
         if let Some(stop) = stop {
             renderer.result(&outcome(
                 Cause::Stopped,

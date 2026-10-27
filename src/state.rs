@@ -9,13 +9,60 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// What a view follows. A delegate of another agent program adds a kind beside `Codex`.
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    #[default]
+    Subagent,
+    Codex,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct Child {
     pub agent_id: String,
     pub agent_type: String,
+    #[serde(default)]
     pub transcript: PathBuf,
     #[serde(default)]
     pub orchestrator: Option<Process>,
+    #[serde(default)]
+    pub kind: Kind,
+    #[serde(default)]
+    pub delegate: Option<DelegateRun>,
+}
+
+/// What the view of a delegate needs to know about its run.
+#[derive(Deserialize, Serialize)]
+pub struct DelegateRun {
+    pub out_dir: PathBuf,
+    pub relay: Process,
+    pub started_ms: u64,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub title: Option<String>,
+}
+
+/// What a delegate run has told Herdr about the orchestrator's pane.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Reporting {
+    pub run_id: String,
+    pub pane: String,
+    pub source: String,
+    pub agent: String,
+    pub lifecycle: bool,
+}
+
+/// A running delegate, for the helpers that outlive its wrapper.
+#[derive(Deserialize, Serialize)]
+pub struct Delegate {
+    #[serde(flatten)]
+    pub reporting: Reporting,
+    pub wrapper: Process,
+    pub wrapper_group: u32,
+    pub relay: Process,
+    pub orchestrator: Option<Process>,
+    pub kill_grace_secs: u64,
 }
 
 #[derive(Deserialize, Serialize)]

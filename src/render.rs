@@ -71,6 +71,8 @@ impl<W: Write> Renderer<W> {
             StepKind::Edit => ("32", "✎ edit"),
             StepKind::Message => ("1", "message"),
             StepKind::ToolResult => ("2", "result"),
+            StepKind::Note => ("2", "note"),
+            StepKind::Error => ("31", "error"),
         };
         let stamp = step
             .timestamp

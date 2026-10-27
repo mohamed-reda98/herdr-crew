@@ -1,14 +1,22 @@
+mod codex;
+mod delegate;
 mod herdr;
 mod hooks;
 mod install;
 mod naming;
+mod pane;
 mod process;
 mod render;
 mod state;
+mod supervise;
+mod tail;
 mod transcript;
 mod view;
 
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -37,6 +45,16 @@ fn main() {
         }
         return;
     }
+    // A delegate exits with its relay's code, so it reports its own errors.
+    if args.first().is_some_and(|arg| arg == "delegate") {
+        match delegate::run(&args[1..]) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("herdr-crew: {error}");
+                std::process::exit(2);
+            }
+        }
+    }
     if let Err(error) = run(&args) {
         eprintln!("herdr-crew: {error}");
         std::process::exit(1);
@@ -51,12 +69,14 @@ fn run(args: &[String]) -> Result<()> {
         .as_slice()
     {
         ["view"] => view::run(),
+        ["delegate-guard", dir] => supervise::guard(Path::new(dir)),
+        ["delegate-watchdog", dir] => supervise::watchdog(Path::new(dir)),
         ["install-hooks"] => install::run(None),
         ["install-hooks", "--settings", path] => install::run(Some(PathBuf::from(path))),
         [] | ["--help"] | ["-h"] => {
-            println!("herdr-crew\n\n  hook subagent-start\n  hook subagent-stop\n  view\n  install-hooks [--settings PATH]");
+            println!("herdr-crew\n\n  hook subagent-start\n  hook subagent-stop\n  view\n  delegate --agent codex [--title TASK] RELAY_ARGS...\n  install-hooks [--settings PATH]");
             Ok(())
         }
-        _ => Err("expected hook, view, or install-hooks; see --help".into()),
+        _ => Err("expected hook, view, delegate, or install-hooks; see --help".into()),
     }
 }

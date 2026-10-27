@@ -1,4 +1,4 @@
-use crate::{herdr, render, state, transcript::ClaudeTranscript};
+use crate::{herdr, render, state};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -57,25 +57,51 @@ pub fn tab_name(
     description: Option<&str>,
     agent_type: &str,
 ) -> String {
-    let clean = |text: &str| render::one_line(text, PART_WIDTH);
-    let model = model.map(short_model).map(|model| clean(&model));
-    let effort = effort.map(clean);
     let task = description
-        .map(|text| {
-            text.split_whitespace()
-                .take(TASK_WORDS)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .map(|text| clean(&text))
+        .map(first_words)
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| clean(agent_type));
+    compose(model, effort, &task, "sub")
+}
+
+/// A delegate's name: the title as given, else the first words of its brief.
+pub fn delegate_name(
+    model: Option<&str>,
+    effort: Option<&str>,
+    title: Option<&str>,
+    brief: Option<&str>,
+) -> String {
+    let title = title.map(clean).filter(|text| !text.is_empty());
+    let task = title
+        .or_else(|| brief.map(first_words).filter(|text| !text.is_empty()))
+        .unwrap_or_default();
+    compose(model, effort, &task, "codex")
+}
+
+fn clean(text: &str) -> String {
+    render::one_line(text, PART_WIDTH)
+}
+
+fn first_words(text: &str) -> String {
+    clean(
+        &text
+            .split_whitespace()
+            .take(TASK_WORDS)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+// `unnamed_head` stands in for the model when it is unknown.
+fn compose(model: Option<&str>, effort: Option<&str>, task: &str, unnamed_head: &str) -> String {
+    let model = model.map(short_model).map(|model| clean(&model));
+    let effort = effort.map(clean);
     let head = match model.filter(|model| !model.is_empty()) {
         Some(model) => match effort.filter(|effort| !effort.is_empty()) {
             Some(effort) => format!("{model} {effort}"),
             None => model,
         },
-        None => "sub".to_owned(),
+        None => unnamed_head.to_owned(),
     };
     if task.is_empty() {
         head
@@ -105,22 +131,21 @@ pub fn rename(tab_id: &str, name: &str) -> bool {
 /// Renames a view's tab each time more of its name becomes known.
 pub struct Namer {
     tab_file: PathBuf,
-    agent_type: String,
     applied: Option<String>,
     tab_id: Option<String>,
 }
 
 impl Namer {
-    pub fn new(child_dir: &Path, agent_type: String) -> Self {
+    pub fn new(child_dir: &Path) -> Self {
         Self {
             tab_file: child_dir.join("tab.json"),
-            agent_type,
             applied: None,
             tab_id: None,
         }
     }
 
-    pub fn refresh(&mut self, source: &mut ClaudeTranscript) {
+    /// `name` is only evaluated once the tab is known to be the view's own.
+    pub fn refresh(&mut self, name: impl FnOnce() -> String) {
         // The opener records the tab after its own rename, so waiting for it keeps that rename
         // from landing on top of a newer name.
         if self.tab_id.is_none() {
@@ -130,13 +155,7 @@ impl Namer {
             self.tab_id = Some(tab.tab_id);
             self.applied = Some(tab.name);
         }
-        source.load_description();
-        let name = tab_name(
-            source.model(),
-            source.effort(),
-            source.description(),
-            &self.agent_type,
-        );
+        let name = name();
         if self.applied.as_ref() != Some(&name) {
             // A failed rename is not retried: it would repeat on every poll.
             if let Some(tab_id) = &self.tab_id {
@@ -168,6 +187,31 @@ mod tests {
         ] {
             assert_eq!(short_model(id), short, "{id}");
         }
+    }
+
+    #[test]
+    fn delegate_names_use_the_title_whole_and_the_brief_by_its_first_words() {
+        let name = delegate_name;
+        assert_eq!(
+            name(
+                Some("gpt-6.1-sol"),
+                Some("high"),
+                Some("fix the login redirect bug"),
+                Some("ignored")
+            ),
+            "gpt-6.1-sol high: fix the login redirect bug"
+        );
+        assert_eq!(
+            name(
+                Some("gpt-6.1-sol"),
+                None,
+                None,
+                Some("Port the\nwrapper into Rust")
+            ),
+            "gpt-6.1-sol: Port the wrapper"
+        );
+        assert_eq!(name(None, None, Some(" "), Some("a b c d")), "codex: a b c");
+        assert_eq!(name(None, Some("high"), None, None), "codex");
     }
 
     #[test]

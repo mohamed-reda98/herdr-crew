@@ -1,9 +1,11 @@
 # herdr-crew
 
 A Linux plugin for Herdr 0.9+ that opens one read-only **view** for each Claude
-Code **subagent** an **orchestrator** starts. Each view is a separate tab in the
+Code **subagent** an **orchestrator** starts, and for each Codex **delegate** it
+starts through `herdr-crew delegate`. Each view is a separate tab in the
 orchestrator's workspace and opens without taking focus. It shows the **brief**
-first, then live **steps**, and closes 10 seconds after the subagent stops.
+first, then live **steps**, then the result and status, and closes 10 seconds
+after the child ends.
 
 ## Install
 
@@ -31,8 +33,8 @@ absolute path to the built binary, including shell quoting for spaces. Keep this
 checkout at that path and rebuild after updates. The linked plugin launches
 `bin/herdr-crew`, which executes `target/release/herdr-crew` from this checkout.
 
-Start a subagent from Claude Code inside Herdr. A tab named `⇢ sub: <agent type>`
-appears without switching away from the orchestrator. Each subagent gets its own
+Start a subagent from Claude Code inside Herdr. A tab named `<model> <effort>: <task>`
+(for example `sonnet-5.5 high: find ledger query`) appears without switching away from the orchestrator. Each subagent gets its own
 tab; there is no shared tab or configured concurrency limit. Switching to a view
 does not send input to the subagent. Closing the view does not stop the subagent.
 
@@ -46,10 +48,13 @@ does not send input to the subagent. Closing the view does not stop the subagent
 - `herdr-crew view` follows the child selected by `HERDR_CREW_CHILD_DIR`. The
   plugin sets this automatically; it is not a general conversation browser.
 - `herdr-crew install-hooks [--settings PATH]` installs the two hooks above.
+- `herdr-crew delegate --agent codex [--title <short task>] <relay args...>` runs
+  a Codex delegate; see [Delegates](#delegates).
 
-Outside a Herdr pane, **every command** exits 0 silently, including hook
-installation and help. Both `HERDR_ENV=1` and a nonempty `HERDR_PANE_ID` are
-required. Hooks also exit 0 silently on malformed input, filesystem failures,
+Outside a Herdr pane the hooks exit 0 silently, while `install-hooks`, `--help`
+and `delegate` work anywhere (`delegate` runs the relay unchanged, with no view).
+Both `HERDR_ENV=1` and a nonempty `HERDR_PANE_ID` make a pane a Herdr pane. Hooks
+also exit 0 silently on malformed input, filesystem failures,
 missing executables, or Herdr failures. Their settings timeout is two seconds;
 all filesystem writes and Herdr calls happen in detached processes. Nested
 subagent transcripts are ignored.
@@ -60,7 +65,7 @@ The workspace comes from `HERDR_WORKSPACE_ID`, falling back to the part of
 ```text
 herdr plugin pane open --plugin herdr-crew --entrypoint view --placement tab \
   --workspace <workspace> --no-focus --env HERDR_CREW_CHILD_DIR=<directory>
-herdr tab rename <tab_id> '⇢ sub: <agent type>'
+herdr tab rename <tab_id> '<model> <effort>: <task>'
 ```
 
 The view waits for
@@ -80,7 +85,51 @@ that record has elapsed. A sibling `agent-<agent_id>.meta.json` with
 `"finished": true` supplies a fallback if the stop hook is missed (linger starts
 when the view observes it). Herdr closes the plugin tab when its command exits.
 If neither completion signal arrives, the view continues waiting; close it
-manually. There is no final report or status appended by the view.
+manually.
+
+## Delegates
+
+```sh
+herdr-crew delegate --agent codex --title "fix login redirect" --brief brief.txt --cd /path/to/repo
+```
+
+This starts the `codex-delegate` skill's relay (`node $CODEX_DELEGATE_RELAY`,
+default `~/.claude/skills/codex-delegate/scripts/relay.mjs`) and opens a view for
+the run. `--agent` and `--title` are consumed; everything else reaches the relay
+untouched, and its stdin, stdout, stderr and exit code are the relay's own
+(`128 + n` if a signal ended it). Only `--agent codex` exists; any other agent is
+rejected with exit 2 before anything starts. The brief may be given with
+`--brief` or on stdin.
+
+Inside a Herdr pane the wrapper:
+
+- forces `--out-dir <state>/delegates/<run>/out` unless the caller gave one (a
+  valueless `--out-dir` is left for the relay to reject), so the view can follow
+  `events.jsonl` live;
+- opens a view tab once the relay has written `brief.txt`, so a run the relay
+  rejects up front has no view. The view shows the brief, then Codex's commands,
+  edits, thoughts, messages and errors from the event stream, then the result
+  (`finalMessage`) and status. Codex events carry no times, so each step is
+  stamped when the view sees it;
+- names the tab `<model> <effort>: <task>`. The task is `--title` as given, else
+  the first 3 words of the brief; model and effort come from `--model` /
+  `--effort`, else `model` / `model_reasoning_effort` in
+  `$CODEX_HOME/config.toml` (default `~/.codex`), else from the result when a
+  lane set them. Unknown parts are dropped, and an unknown model reads `codex`;
+- shows the delegate on the orchestrator's pane: a `codex ⇠ claude` label and a
+  `delegate` token, plus a working agent state when Herdr detects no agent in the
+  pane. All of it is cleared when the run ends, and also when the wrapper is
+  killed: a detached watchdog clears it once the wrapper and the relay are both
+  gone, unless another delegate from the same pane is still running;
+- stops the run when the orchestrator's session closes. A detached guard watches
+  the nearest `claude` ancestor process; when it ends the relay gets SIGTERM
+  (so it aborts Codex and writes an `aborted` result), and after a grace period
+  the processes and process groups the run made are killed.
+
+Status in the view: `completed` shows `finalMessage`; `failed`, `timeout` and
+any other relay status show the error; `aborted`, or a relay that vanished
+without `result.json` (and without an error event), is `killed`. A `result.json`
+older than the run (a reused `--out-dir`) is ignored.
 
 ## State and environment
 
@@ -92,6 +141,11 @@ State lives under `$XDG_STATE_HOME/herdr-crew`, defaulting to
   child.json   subagent identity and transcript path
   open.lock    exclusive claim preventing duplicate start hooks from opening tabs
   stop.json    stop time and optional transcript path supplied by the stop hook
+delegates/<run>/
+  child.json   what the view follows: kind, output directory, relay, name inputs
+  tab.json     the view's tab, recorded by the opener
+  delegate.json  pane reporting, wrapper, relay and orchestrator processes
+  out/         the relay's brief.txt, events.jsonl, final.txt, result.json (default)
 ```
 
 New directories are private (0700), and new files are private (0600). State
@@ -108,15 +162,25 @@ Environment overrides:
 | `HERDR_CREW_STATE_DIR` | State root (use an absolute path) |
 | `HERDR_CREW_CHILD_DIR` | The view's per-child state directory, passed explicitly by the start hook |
 | `HERDR_CREW_LINGER_MS` | Linger in milliseconds; defaults to `10000`, forwarded to the view |
+| `CODEX_DELEGATE_RELAY` | The relay script `delegate` runs |
+| `HERDR_CREW_NODE` | Interpreter for the relay; defaults to `node` |
+| `HERDR_CREW_ORCHESTRATOR_PID` | Process whose end stops a delegate; `0` turns the guard off |
+| `HERDR_CREW_KILL_GRACE` | Seconds the relay gets to stop before the leftovers are killed; defaults to `15` |
+| `HERDR_REPORT_SOURCE` | `--source` for the pane reports; defaults to `herdr-crew` |
+| `CODEX_HOME` | Where Codex's `config.toml` is read from; defaults to `~/.codex` |
 
 ## Development
 
 `src/hooks.rs` owns detached hook dispatch and Herdr CLI calls; `src/state.rs`
 owns state records; `src/view.rs` owns the view lifecycle and `StepSource`
-interface; `src/transcript.rs` supplies Claude Code steps; `src/render.rs` renders
-terminal output; `src/install.rs` merges settings; `src/main.rs` dispatches
-commands and enforces the Herdr environment guard. The placeholder tab name is
-kept in `tab_name` in `src/hooks.rs`.
+interface; `src/transcript.rs` supplies Claude Code steps and `src/codex.rs`
+Codex delegate steps (both follow files through `src/tail.rs`); `src/delegate.rs`
+is the `delegate` wrapper, `src/pane.rs` its pane reports and `src/supervise.rs`
+its detached watchdog and guard; `src/naming.rs` builds tab names; `src/render.rs`
+renders terminal output; `src/install.rs` merges settings; `src/main.rs`
+dispatches commands and enforces the Herdr environment guard. A second delegate
+kind adds a `state::Kind`, a relay in `Relay::of` and a step source beside
+`CodexRun`.
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -128,5 +192,6 @@ cargo build --release
 
 Tests use synthetic transcripts, temporary state/settings, and a fake Herdr CLI.
 They never use live Herdr, real Claude settings, real conversations, or the
-network. Delegates, nested children, sidebar summaries, and review logic are
-outside this implementation.
+network; delegate tests use a fake relay (`CODEX_DELEGATE_RELAY` with
+`HERDR_CREW_NODE=/bin/sh`). Claude delegates, nested children, sidebar summaries,
+and review logic are outside this implementation.
