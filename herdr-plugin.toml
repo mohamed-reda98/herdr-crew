@@ -1,0 +1,12 @@
+id = "herdr-crew"
+name = "Herdr Crew"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Read-only views of an orchestrator's subagents"
+platforms = ["linux"]
+
+[[panes]]
+id = "view"
+title = "Subagent"
+placement = "tab"
+command = ["./bin/herdr-crew", "view"]
