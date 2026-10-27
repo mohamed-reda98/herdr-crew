@@ -8,6 +8,7 @@ mod pane;
 mod process;
 mod render;
 mod state;
+mod summary;
 mod supervise;
 mod tail;
 mod transcript;

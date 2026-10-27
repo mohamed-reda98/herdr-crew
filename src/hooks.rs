@@ -1,4 +1,4 @@
-use crate::{herdr, naming, process::Process, state, Result};
+use crate::{herdr, naming, pane, process::Process, state, summary, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -112,18 +112,30 @@ pub fn dispatch(action: &str, payload: &str) -> Result<()> {
     input.validate(action)?;
     let child_dir = input.child_dir()?;
     state::create_dir(&child_dir)?;
+    let pane = env::var("HERDR_PANE_ID")?;
+    let source = pane::source();
     match action {
-        "subagent-start" => open_view(&input, &child_dir),
-        "subagent-stop" => state::write_json(
-            &child_dir.join("stop.json"),
-            &state::Stop {
-                stopped_at_ms: state::epoch_ms(),
-                transcript: input
-                    .agent_transcript_path
-                    .filter(|path| path.is_absolute()),
-                message: input.last_assistant_message,
-            },
-        ),
+        "subagent-start" => {
+            let member = summary::Member::subagent(&child_dir, input.orchestrator);
+            summary::started(&pane, &source, &member);
+            let opened = open_view(&input, &child_dir);
+            summary::settle(&pane, &source, &member);
+            opened
+        }
+        "subagent-stop" => {
+            let recorded = state::write_json(
+                &child_dir.join("stop.json"),
+                &state::Stop {
+                    stopped_at_ms: state::epoch_ms(),
+                    transcript: input
+                        .agent_transcript_path
+                        .filter(|path| path.is_absolute()),
+                    message: input.last_assistant_message,
+                },
+            );
+            summary::changed(&pane, &source);
+            recorded
+        }
         _ => unreachable!(),
     }
 }

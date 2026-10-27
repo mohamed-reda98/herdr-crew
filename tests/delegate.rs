@@ -725,7 +725,7 @@ fn the_pane_shows_the_delegate_while_it_runs_and_is_cleared_when_it_ends() {
     wait_until(|| fixture.calls_matching(SET) == 1);
     let log = fixture.log();
     assert!(log.contains(&"pane report-agent w1D:p1 --source herdr-crew --agent codex --state working --message codex exec (delegated)".to_owned()));
-    assert!(log.contains(&"pane report-metadata w1D:p1 --source herdr-crew --display-agent codex ⇠ claude --token delegate=codex running".to_owned()));
+    assert!(log.contains(&"pane report-metadata w1D:p1 --source herdr-crew --display-agent codex ⇠ claude --token delegate=1 delegate working".to_owned()));
     assert_eq!(fixture.calls_matching(CLEARED), 0);
     fs::remove_file(&hold).unwrap();
     delegate.finish();

@@ -116,11 +116,11 @@ Inside a Herdr pane the wrapper:
   `--effort`, else `model` / `model_reasoning_effort` in
   `$CODEX_HOME/config.toml` (default `~/.codex`), else from the result when a
   lane set them. Unknown parts are dropped, and an unknown model reads `codex`;
-- shows the delegate on the orchestrator's pane: a `codex ⇠ claude` label and a
-  `delegate` token, plus a working agent state when Herdr detects no agent in the
-  pane. All of it is cleared when the run ends, and also when the wrapper is
-  killed: a detached watchdog clears it once the wrapper and the relay are both
-  gone, unless another delegate from the same pane is still running;
+- shows the delegate on the orchestrator's pane: a `codex ⇠ claude` label and the
+  [sidebar summary](#sidebar-summary), plus a working agent state when Herdr
+  detects no agent in the pane. The label and the agent state are cleared when
+  the last delegate from the pane ends. A killed wrapper is covered too: a
+  detached watchdog recomputes once the wrapper and the relay are both gone;
 - stops the run when the orchestrator's session closes. A detached guard watches
   the nearest `claude` ancestor process; when it ends the relay gets SIGTERM
   (so it aborts Codex and writes an `aborted` result), and after a grace period
@@ -130,6 +130,30 @@ Status in the view: `completed` shows `finalMessage`; `failed`, `timeout` and
 any other relay status show the error; `aborted`, or a relay that vanished
 without `result.json` (and without an error event), is `killed`. A `result.json`
 older than the run (a reused `--out-dir`) is ignored.
+
+## Sidebar summary
+
+While any child of an orchestrator is working, its pane carries a summary in the
+`delegate` metadata token (`herdr pane report-metadata <pane> --token
+delegate=<summary>`), for example `1 delegate working`, `1 sub working` or
+`2 delegates · 1 sub working`. Delegates and subagents are counted apart. The
+token is removed when nothing is working. Herdr shows it where a sidebar row
+uses `$delegate`; this plugin does not edit your Herdr config:
+
+```toml
+[ui.sidebar.agents.rows_by_agent]
+claude = [["state_icon", "workspace", "tab"], ["agent", "$delegate"]]
+```
+
+Each child registers itself under `panes/<pane>/` in the state directory, and
+every start and end recomputes the summary from those records under a lock, so
+children that start or finish together cannot leave an older count on screen.
+A child counts as working only while it is verifiably so: a delegate while its
+wrapper or relay runs, a subagent until its stop hook is recorded; either stops
+counting once the orchestrator process is gone. A subagent whose hook could not
+identify the orchestrator is never counted. A killed delegate is handled by its
+watchdog, and a subagent whose orchestrator died by its start hook's detached
+process, which stays until the subagent stops or the orchestrator goes away.
 
 ## State and environment
 
@@ -141,6 +165,9 @@ State lives under `$XDG_STATE_HOME/herdr-crew`, defaulting to
   child.json   subagent identity and transcript path
   open.lock    exclusive claim preventing duplicate start hooks from opening tabs
   stop.json    stop time and optional transcript path supplied by the stop hook
+panes/<pane>/
+  lock         held while the summary is recomputed and reported
+  d.<run>.json, s.<session>.<agent>.json  one record per child that may be working
 delegates/<run>/
   child.json   what the view follows: kind, output directory, relay, name inputs
   tab.json     the view's tab, recorded by the opener
@@ -176,7 +203,8 @@ owns state records; `src/view.rs` owns the view lifecycle and `StepSource`
 interface; `src/transcript.rs` supplies Claude Code steps and `src/codex.rs`
 Codex delegate steps (both follow files through `src/tail.rs`); `src/delegate.rs`
 is the `delegate` wrapper, `src/pane.rs` its pane reports and `src/supervise.rs`
-its detached watchdog and guard; `src/naming.rs` builds tab names; `src/render.rs`
+its detached watchdog and guard; `src/summary.rs` the per-pane records and the
+sidebar summary; `src/naming.rs` builds tab names; `src/render.rs`
 renders terminal output; `src/install.rs` merges settings; `src/main.rs`
 dispatches commands and enforces the Herdr environment guard. A second delegate
 kind adds a `state::Kind`, a relay in `Relay::of` and a step source beside
@@ -193,5 +221,5 @@ cargo build --release
 Tests use synthetic transcripts, temporary state/settings, and a fake Herdr CLI.
 They never use live Herdr, real Claude settings, real conversations, or the
 network; delegate tests use a fake relay (`CODEX_DELEGATE_RELAY` with
-`HERDR_CREW_NODE=/bin/sh`). Claude delegates, nested children, sidebar summaries,
-and review logic are outside this implementation.
+`HERDR_CREW_NODE=/bin/sh`). Claude delegates, nested children, and review logic
+are outside this implementation.

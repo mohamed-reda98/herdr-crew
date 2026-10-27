@@ -1,11 +1,10 @@
 use crate::{
-    pane, process,
-    state::{self, Delegate, Reporting},
-    Result,
+    process,
+    state::{self, Delegate},
+    summary, Result,
 };
 use std::{
     collections::BTreeSet,
-    fs,
     io::{self, Error},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
@@ -43,37 +42,17 @@ pub fn spawn(role: &str, run_dir: &Path) -> io::Result<Child> {
     command.spawn()
 }
 
-fn live(delegate: &Delegate) -> bool {
+pub fn live(delegate: &Delegate) -> bool {
     process::alive(&delegate.wrapper) || process::alive(&delegate.relay)
 }
 
-/// Clears the pane unless another delegate started from it is still running: that one owns the
-/// label now and clears it when it ends.
-pub fn clear_state(report: &Reporting) {
-    let others = runs_dir()
-        .ok()
-        .and_then(|dir| fs::read_dir(dir).ok())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| state::read_json::<Delegate>(&entry.path().join("delegate.json")).ok())
-        .any(|other| {
-            other.reporting.run_id != report.run_id
-                && other.reporting.pane == report.pane
-                && live(&other)
-        });
-    if !others {
-        pane::clear(report);
-    }
-}
-
-/// Clears the pane once the wrapper and the relay are both gone, however the wrapper ended.
+/// Updates the pane once the wrapper and the relay are both gone, however the wrapper ended.
 pub fn watchdog(run_dir: &Path) -> Result<()> {
     let delegate: Delegate = state::read_json(&run_dir.join("delegate.json"))?;
     while live(&delegate) {
         thread::sleep(POLL);
     }
-    clear_state(&delegate.reporting);
+    summary::ended(&delegate.reporting);
     Ok(())
 }
 
