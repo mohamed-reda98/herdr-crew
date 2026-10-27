@@ -9,13 +9,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// What a view follows. A delegate of another agent program adds a kind beside `Codex`.
+/// What a view follows. A delegate of another agent program adds a kind beside `Codex`
+/// and `Claude`.
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     #[default]
     Subagent,
     Codex,
+    Claude,
 }
 
 #[derive(Deserialize, Serialize)]

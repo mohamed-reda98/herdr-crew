@@ -173,7 +173,7 @@ fn step(line: &Value, kind: StepKind, text: String) -> Update {
     })
 }
 
-fn assistant_steps(line: &Value, content: &Value) -> Vec<Update> {
+pub(crate) fn assistant_steps(line: &Value, content: &Value) -> Vec<Update> {
     if let Some(text) = content.as_str() {
         return vec![step(line, StepKind::Message, text.to_owned())];
     }
@@ -215,7 +215,7 @@ fn tool_step(block: &Value) -> (StepKind, String) {
     (kind, format!("{name}: {summary}"))
 }
 
-fn tool_results(line: &Value, content: &Value) -> Vec<Update> {
+pub(crate) fn tool_results(line: &Value, content: &Value) -> Vec<Update> {
     content
         .as_array()
         .into_iter()

@@ -1,31 +1,25 @@
 use crate::{
-    naming, process,
-    process::Process,
-    state::{self, DelegateRun},
+    naming,
+    run::{self, observed_at, text, RunFiles},
+    state::DelegateRun,
     tail::Tail,
-    view::{Ending, Outcome, Status, Step, StepKind, StepSource, Update},
+    view::{Delegated, Ending, Outcome, Step, StepKind, StepSource, Update},
 };
 use serde_json::Value;
 use std::{
     env, fs,
     io::{self},
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
 };
 
 const OUTPUT_LINES: usize = 4;
-// The relay may stamp its files a little before the wrapper noted the start, on a coarse clock.
-const CLOCK_SLACK_MS: u64 = 1_000;
 
 /// A Codex delegate seen through the files its relay writes into the run directory.
 pub struct CodexRun {
-    out_dir: PathBuf,
-    started_ms: u64,
-    relay: Process,
+    files: RunFiles,
     tail: Tail,
     brief_sent: bool,
     brief: Option<String>,
-    result: Option<Value>,
     last_error: Option<String>,
     model: Option<String>,
     effort: Option<String>,
@@ -36,119 +30,13 @@ impl CodexRun {
     pub fn new(run: DelegateRun) -> Self {
         Self {
             tail: Tail::new(run.out_dir.join("events.jsonl")),
-            out_dir: run.out_dir,
-            started_ms: run.started_ms,
-            relay: run.relay,
+            files: RunFiles::new(run.out_dir, run.started_ms, run.relay),
             brief_sent: false,
             brief: None,
-            result: None,
             last_error: None,
             model: run.model,
             effort: run.effort,
             title: run.title,
-        }
-    }
-
-    pub fn relay_gone(&self) -> bool {
-        !process::alive(&self.relay)
-    }
-
-    fn fresh(&self, name: &str) -> Option<PathBuf> {
-        let path = self.out_dir.join(name);
-        written_since(&path, self.started_ms).then_some(path)
-    }
-
-    /// The relay's result record once it has written one for this run.
-    pub fn result(&mut self) -> Option<Value> {
-        if self.result.is_none() {
-            let path = self.fresh("result.json")?;
-            self.result = state::read_json(&path).ok();
-        }
-        self.result.clone()
-    }
-
-    fn read_brief(&mut self) -> Option<String> {
-        let bytes = fs::read(self.fresh("brief.txt")?).ok()?;
-        // The relay creates the file before it fills it.
-        if bytes.is_empty() {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&bytes).into_owned())
-    }
-
-    pub fn tab_name(&self) -> String {
-        let from_result = |key: &str| {
-            self.result
-                .as_ref()
-                .and_then(|result| text(&result[key]))
-                .map(str::to_owned)
-        };
-        let model = from_result("model").or_else(|| self.model.clone());
-        let effort = from_result("effort").or_else(|| self.effort.clone());
-        naming::delegate_name(
-            model.as_deref(),
-            effort.as_deref(),
-            self.title.as_deref(),
-            self.brief.as_deref(),
-        )
-    }
-
-    pub fn outcome(&self, result: &Value) -> Outcome {
-        let field = |key: &str| text(&result[key]).map(str::to_owned);
-        let status = result["status"].as_str();
-        let (kind, text) = match status {
-            Some("completed") => (
-                Status::Completed,
-                field("finalMessage").unwrap_or_else(|| "Completed without a final message".into()),
-            ),
-            Some("aborted") => (
-                Status::Killed,
-                field("error").unwrap_or_else(|| "Stopped before it finished".into()),
-            ),
-            Some(status) => {
-                let stderr = result["stderrTail"]
-                    .as_array()
-                    .map(|lines| {
-                        lines
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .rev()
-                            .take(8)
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .filter(|lines| !lines.trim().is_empty());
-                let text = field("error")
-                    .or_else(|| self.last_error.clone())
-                    .or(stderr)
-                    .or_else(|| field("finalMessage"))
-                    .unwrap_or_else(|| match result["exitCode"].as_i64() {
-                        Some(code) => format!("{status} (exit {code})"),
-                        None => status.to_owned(),
-                    });
-                (Status::Failed, text)
-            }
-            None => (
-                Status::Unknown,
-                "The relay's result has no status".to_owned(),
-            ),
-        };
-        Outcome { status: kind, text }
-    }
-
-    pub fn outcome_without_result(&self) -> Outcome {
-        match &self.last_error {
-            Some(error) => Outcome {
-                status: Status::Failed,
-                text: error.clone(),
-            },
-            None => Outcome {
-                status: Status::Killed,
-                text: "The relay ended without writing a result".into(),
-            },
         }
     }
 
@@ -267,12 +155,48 @@ impl CodexRun {
     }
 }
 
+impl Delegated for CodexRun {
+    fn relay_gone(&self) -> bool {
+        self.files.relay_gone()
+    }
+
+    fn result(&mut self) -> Option<Value> {
+        self.files.result()
+    }
+
+    fn tab_name(&self) -> String {
+        let from_result = |key: &str| {
+            self.files
+                .last_result()
+                .and_then(|result| text(&result[key]))
+                .map(str::to_owned)
+        };
+        let model = from_result("model").or_else(|| self.model.clone());
+        let effort = from_result("effort").or_else(|| self.effort.clone());
+        naming::delegate_name(
+            "codex",
+            model.as_deref(),
+            effort.as_deref(),
+            self.title.as_deref(),
+            self.brief.as_deref(),
+        )
+    }
+
+    fn outcome(&self, result: &Value) -> Outcome {
+        run::outcome(result, self.last_error.as_deref())
+    }
+
+    fn outcome_without_result(&self) -> Outcome {
+        run::outcome_without_result(self.last_error.as_deref())
+    }
+}
+
 impl StepSource for CodexRun {
     fn poll(&mut self) -> io::Result<Vec<Update>> {
         let mut updates = Vec::new();
         if !self.brief_sent {
             // The brief heads the view, so no step is shown before it.
-            let Some(brief) = self.read_brief() else {
+            let Some(brief) = self.files.read_brief() else {
                 return Ok(updates);
             };
             self.brief_sent = true;
@@ -292,20 +216,6 @@ impl StepSource for CodexRun {
     }
 }
 
-/// Whether the relay wrote the file during this run: an output directory the caller reuses still
-/// holds the previous run's files.
-pub fn written_since(path: &Path, started_ms: u64) -> bool {
-    fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .is_some_and(|modified| modified.as_millis() as u64 + CLOCK_SLACK_MS >= started_ms)
-}
-
-fn text(value: &Value) -> Option<&str> {
-    value.as_str().filter(|text| !text.trim().is_empty())
-}
-
 fn error_text(event: &Value) -> String {
     [
         &event["error"]["message"],
@@ -315,18 +225,6 @@ fn error_text(event: &Value) -> String {
     .into_iter()
     .find_map(|value| value.as_str())
     .map_or_else(|| event.to_string(), str::to_owned)
-}
-
-// Codex events carry no times; a step is stamped when the view sees it, which is when it happened
-// for a view that follows live.
-fn observed_at() -> String {
-    let seconds = state::epoch_ms() / 1000 % 86_400;
-    format!(
-        "0000-00-00T{:02}:{:02}:{:02}Z",
-        seconds / 3600,
-        seconds / 60 % 60,
-        seconds % 60
-    )
 }
 
 /// Codex runs commands as `/bin/zsh -lc '<script>'`; the script is what matters.

@@ -1,5 +1,5 @@
 use crate::{
-    codex, hooks, naming, pane, process,
+    codex, hooks, naming, pane, process, run as run_files,
     state::{self, Child, Delegate, DelegateRun, Kind, Reporting},
     supervise, Result,
 };
@@ -16,24 +16,39 @@ use std::{
 };
 
 const USAGE: &str =
-    "usage: herdr-crew delegate --agent codex [--title <short task>] <relay args...>
+    "usage: herdr-crew delegate --agent codex|claude [--title <short task>] <relay args...>
 
-Runs the codex-delegate relay with the given arguments and opens a view for the run.
-Everything but --agent and --title goes to the relay unchanged.";
+Runs the codex-delegate or claude-delegate relay with the given arguments and opens a view for
+the run. Everything but --agent and --title goes to the relay unchanged.";
 
-// Options the relay reads a value for; the scan must not mistake a value for an option.
-const RELAY_VALUE_OPTIONS: [&str; 10] = [
-    "--brief",
-    "--cd",
-    "--lane",
-    "--model",
-    "--effort",
-    "--service-tier",
-    "--sandbox",
-    "--session",
-    "--keep-env",
-    "--timeout",
-];
+// Options a relay reads a value for; the scan must not mistake a value for an option.
+fn relay_value_options(kind: Kind) -> &'static [&'static str] {
+    match kind {
+        Kind::Claude => &[
+            "--brief",
+            "--cd",
+            "--lane",
+            "--model",
+            "--effort",
+            "--session",
+            "--timeout",
+            "--max-turns",
+            "--max-budget-usd",
+        ],
+        _ => &[
+            "--brief",
+            "--cd",
+            "--lane",
+            "--model",
+            "--effort",
+            "--service-tier",
+            "--sandbox",
+            "--session",
+            "--keep-env",
+            "--timeout",
+        ],
+    }
+}
 
 struct Request {
     kind: Kind,
@@ -46,14 +61,12 @@ enum Parsed {
     Run(Request),
 }
 
-/// The agent program a delegate runs as. A second kind adds its own relay and step source here.
+/// The agent program a delegate runs as. A further kind adds its own relay and step source.
 fn agent_kind(name: &str) -> Result<Kind> {
     match name {
         "codex" => Ok(Kind::Codex),
-        "claude" => {
-            Err("--agent claude is not supported: only --agent codex starts a delegate".into())
-        }
-        other => Err(format!("unknown agent {other:?}: expected --agent codex").into()),
+        "claude" => Ok(Kind::Claude),
+        other => Err(format!("unknown agent {other:?}: expected --agent codex or claude").into()),
     }
 }
 
@@ -75,7 +88,7 @@ fn parse(args: &[String]) -> Result<Parsed> {
         {
             return Ok(Parsed::Help);
         }
-        return Err("missing --agent: expected --agent codex".into());
+        return Err("missing --agent: expected --agent codex or claude".into());
     };
     Ok(Parsed::Run(Request {
         kind: agent_kind(agent)?,
@@ -92,23 +105,22 @@ struct Relay {
 
 impl Relay {
     fn of(kind: Kind) -> Result<Self> {
-        match kind {
-            Kind::Codex => {
-                let script =
-                    match env::var_os("CODEX_DELEGATE_RELAY").filter(|path| !path.is_empty()) {
-                        Some(path) => PathBuf::from(path),
-                        None => PathBuf::from(env::var_os("HOME").ok_or("HOME is unset")?)
-                            .join(".claude/skills/codex-delegate/scripts/relay.mjs"),
-                    };
-                Ok(Self {
-                    interpreter: env::var_os("HERDR_CREW_NODE")
-                        .filter(|path| !path.is_empty())
-                        .unwrap_or_else(|| "node".into()),
-                    script,
-                })
-            }
-            Kind::Subagent => Err("a subagent has no relay".into()),
-        }
+        let (variable, skill) = match kind {
+            Kind::Codex => ("CODEX_DELEGATE_RELAY", "codex-delegate"),
+            Kind::Claude => ("CLAUDE_DELEGATE_RELAY", "claude-delegate"),
+            Kind::Subagent => return Err("a subagent has no relay".into()),
+        };
+        let script = match env::var_os(variable).filter(|path| !path.is_empty()) {
+            Some(path) => PathBuf::from(path),
+            None => PathBuf::from(env::var_os("HOME").ok_or("HOME is unset")?)
+                .join(format!(".claude/skills/{skill}/scripts/relay.mjs")),
+        };
+        Ok(Self {
+            interpreter: env::var_os("HERDR_CREW_NODE")
+                .filter(|path| !path.is_empty())
+                .unwrap_or_else(|| "node".into()),
+            script,
+        })
     }
 
     fn command(&self, args: &[String]) -> Command {
@@ -146,7 +158,7 @@ struct Scan {
     effort: Option<String>,
 }
 
-fn scan(args: &[String]) -> Scan {
+fn scan(args: &[String], kind: Kind) -> Scan {
     let mut found = Scan {
         out_dir: None,
         model: None,
@@ -159,7 +171,7 @@ fn scan(args: &[String]) -> Scan {
             "--out-dir" => found.out_dir = Some(value.map(|dir| absolute(dir))),
             "--model" => found.model = value.cloned(),
             "--effort" => found.effort = value.cloned(),
-            option if RELAY_VALUE_OPTIONS.contains(&option) => (),
+            option if relay_value_options(kind).contains(&option) => (),
             _ => {
                 at += 1;
                 continue;
@@ -224,7 +236,7 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
     let run_id = format!("{}-{}", state::epoch_ms(), std::process::id());
     let run_dir = supervise::runs_dir()?.join(&run_id);
     state::create_dir(&run_dir)?;
-    let scanned = scan(&request.relay_args);
+    let scanned = scan(&request.relay_args, request.kind);
 
     // The relay writes its files into --out-dir; a known one lets the view follow them live. It
     // goes first so a trailing option without a value is still rejected the way it would be alone.
@@ -244,7 +256,7 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
     let pane_id = env::var("HERDR_PANE_ID")?;
     let (agent, lifecycle) = match pane::detected_agent(&pane_id) {
         Some(agent) => (agent, false),
-        None => ("codex".to_owned(), true),
+        None => (agent_name(request.kind).to_owned(), true),
     };
     let reporting = Reporting {
         run_id,
@@ -256,7 +268,7 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
         agent,
         lifecycle,
     };
-    pane::announce(&reporting);
+    pane::announce(&reporting, request.kind);
 
     forward_terminations();
     let started_ms = state::epoch_ms();
@@ -294,7 +306,11 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
 
     // A view is worth opening once the relay has accepted its arguments, which it shows by
     // writing the brief; one it rejected leaves nothing to watch.
-    let configured = codex::configured();
+    // Codex's own config names the model of a run that gave none; Claude's has no such say.
+    let configured = match request.kind {
+        Kind::Codex => codex::configured(),
+        _ => (None, None),
+    };
     let mut view_target = out_dir.zip(relay_process);
     let status = loop {
         // Looked at before the brief: a relay seen gone has already written it.
@@ -303,7 +319,7 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
             let brief = dir.join("brief.txt");
             // The relay creates the file before it fills it, and never accepts an empty brief.
             let written = fs::metadata(&brief).is_ok_and(|meta| meta.len() > 0);
-            if written && codex::written_since(&brief, started_ms) {
+            if written && run_files::written_since(&brief, started_ms) {
                 let run = DelegateRun {
                     out_dir: dir.clone(),
                     relay: *relay_process,
@@ -333,11 +349,19 @@ fn supervised(request: &Request, relay: &Relay) -> Result<i32> {
         .unwrap_or(1))
 }
 
+fn agent_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Claude => "claude",
+        _ => "codex",
+    }
+}
+
 fn open_view(run_dir: &Path, run_id: &str, kind: Kind, run: DelegateRun) -> Result<()> {
     let brief = fs::read(run.out_dir.join("brief.txt"))
         .ok()
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     let name = naming::delegate_name(
+        agent_name(kind),
         run.model.as_deref(),
         run.effort.as_deref(),
         run.title.as_deref(),
@@ -347,7 +371,7 @@ fn open_view(run_dir: &Path, run_id: &str, kind: Kind, run: DelegateRun) -> Resu
         &run_dir.join("child.json"),
         &Child {
             agent_id: run_id.to_owned(),
-            agent_type: "codex".to_owned(),
+            agent_type: agent_name(kind).to_owned(),
             transcript: PathBuf::new(),
             orchestrator: None,
             kind,

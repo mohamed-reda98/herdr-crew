@@ -1,9 +1,17 @@
-use crate::{herdr, state::Reporting};
+use crate::{
+    herdr,
+    state::{Kind, Reporting},
+};
 use serde_json::Value;
 use std::process::Stdio;
 
 // Distinct from a bare agent name so a pane the user opened by hand is never mistaken for it.
-const LABEL: &str = "codex ⇠ claude";
+fn label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Claude => "claude ⇠ claude",
+        _ => "codex ⇠ claude",
+    }
+}
 const TOKEN: &str = "delegate=codex running";
 
 fn call(args: &[&str]) {
@@ -27,7 +35,7 @@ pub fn detected_agent(pane: &str) -> Option<String> {
 
 /// Shows that a delegate is working. Herdr only lets a source set the lifecycle state of a pane
 /// that has no detected agent; elsewhere the label and token are all it honours.
-pub fn announce(report: &Reporting) {
+pub fn announce(report: &Reporting, kind: Kind) {
     if report.lifecycle {
         call(&[
             "pane",
@@ -50,7 +58,7 @@ pub fn announce(report: &Reporting) {
         "--source",
         &report.source,
         "--display-agent",
-        LABEL,
+        label(kind),
         "--token",
         TOKEN,
     ]);

@@ -78,7 +78,7 @@ pub fn watchdog(run_dir: &Path) -> Result<()> {
 }
 
 /// Stops the run when the orchestrator that started it goes away: the relay would otherwise
-/// leave Codex working unattended, since Codex runs in a process group of its own.
+/// leave the agent working unattended, since it runs in a process group of its own.
 pub fn guard(run_dir: &Path) -> Result<()> {
     let delegate: Delegate = state::read_json(&run_dir.join("delegate.json"))?;
     let Some(orchestrator) = delegate.orchestrator else {

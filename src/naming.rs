@@ -64,8 +64,10 @@ pub fn tab_name(
     compose(model, effort, &task, "sub")
 }
 
-/// A delegate's name: the title as given, else the first words of its brief.
+/// A delegate's name: the title as given, else the first words of its brief. `agent` stands in
+/// for an unknown model.
 pub fn delegate_name(
+    agent: &str,
     model: Option<&str>,
     effort: Option<&str>,
     title: Option<&str>,
@@ -75,7 +77,7 @@ pub fn delegate_name(
     let task = title
         .or_else(|| brief.map(first_words).filter(|text| !text.is_empty()))
         .unwrap_or_default();
-    compose(model, effort, &task, "codex")
+    compose(model, effort, &task, agent)
 }
 
 fn clean(text: &str) -> String {
@@ -194,6 +196,7 @@ mod tests {
         let name = delegate_name;
         assert_eq!(
             name(
+                "codex",
                 Some("gpt-6.1-sol"),
                 Some("high"),
                 Some("fix the login redirect bug"),
@@ -203,6 +206,7 @@ mod tests {
         );
         assert_eq!(
             name(
+                "codex",
                 Some("gpt-6.1-sol"),
                 None,
                 None,
@@ -210,8 +214,15 @@ mod tests {
             ),
             "gpt-6.1-sol: Port the wrapper"
         );
-        assert_eq!(name(None, None, Some(" "), Some("a b c d")), "codex: a b c");
-        assert_eq!(name(None, Some("high"), None, None), "codex");
+        assert_eq!(
+            name("codex", None, None, Some(" "), Some("a b c d")),
+            "codex: a b c"
+        );
+        assert_eq!(name("codex", None, Some("high"), None, None), "codex");
+        assert_eq!(
+            name("claude", None, None, Some("port it"), Some("ignored")),
+            "claude: port it"
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod claude;
 mod codex;
 mod delegate;
 mod herdr;
@@ -7,6 +8,7 @@ mod naming;
 mod pane;
 mod process;
 mod render;
+mod run;
 mod state;
 mod supervise;
 mod tail;
@@ -74,7 +76,7 @@ fn run(args: &[String]) -> Result<()> {
         ["install-hooks"] => install::run(None),
         ["install-hooks", "--settings", path] => install::run(Some(PathBuf::from(path))),
         [] | ["--help"] | ["-h"] => {
-            println!("herdr-crew\n\n  hook subagent-start\n  hook subagent-stop\n  view\n  delegate --agent codex [--title TASK] RELAY_ARGS...\n  install-hooks [--settings PATH]");
+            println!("herdr-crew\n\n  hook subagent-start\n  hook subagent-stop\n  view\n  delegate --agent codex|claude [--title TASK] RELAY_ARGS...\n  install-hooks [--settings PATH]");
             Ok(())
         }
         _ => Err("expected hook, view, delegate, or install-hooks; see --help".into()),

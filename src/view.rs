@@ -1,7 +1,8 @@
 use crate::{
-    codex::CodexRun, naming::Namer, process, render::Renderer, state, transcript::ClaudeTranscript,
-    Result,
+    claude::ClaudeRun, codex::CodexRun, naming::Namer, process, render::Renderer, state,
+    transcript::ClaudeTranscript, Result,
 };
+use serde_json::Value;
 use std::{
     env, io,
     path::{Path, PathBuf},
@@ -67,6 +68,15 @@ pub trait StepSource {
     fn ending(&self) -> Option<Ending>;
 }
 
+/// A delegate's run, which its relay's result record or exit ends.
+pub trait Delegated: StepSource {
+    fn relay_gone(&self) -> bool;
+    fn result(&mut self) -> Option<Value>;
+    fn tab_name(&self) -> String;
+    fn outcome(&self, result: &Value) -> Outcome;
+    fn outcome_without_result(&self) -> Outcome;
+}
+
 fn outcome(cause: Cause, message: Option<&str>, ending: Option<Ending>) -> Outcome {
     let message = message.filter(|text| !text.trim().is_empty());
     let (status, text) = match (cause, ending) {
@@ -102,7 +112,12 @@ pub fn run() -> Result<()> {
         (state::Kind::Codex, Some(run)) => {
             follow_delegate(&child_dir, CodexRun::new(run), renderer, linger)
         }
-        (state::Kind::Codex, None) => Err("the delegate's run record is missing".into()),
+        (state::Kind::Claude, Some(run)) => {
+            follow_delegate(&child_dir, ClaudeRun::new(run), renderer, linger)
+        }
+        (state::Kind::Codex | state::Kind::Claude, None) => {
+            Err("the delegate's run record is missing".into())
+        }
         (state::Kind::Subagent, _) => follow_subagent(
             &child_dir,
             ClaudeTranscript::new(child.transcript, child.agent_id),
@@ -117,7 +132,7 @@ pub fn run() -> Result<()> {
 /// Follows a delegate until its run is over, which its relay's result record or exit tells.
 fn follow_delegate(
     child_dir: &Path,
-    mut source: CodexRun,
+    mut source: impl Delegated,
     mut renderer: Renderer<io::Stdout>,
     linger: Duration,
 ) -> Result<()> {

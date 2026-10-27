@@ -101,6 +101,7 @@ impl Fixture {
             .env("HERDR_TEST_LOG", self.path("herdr.log"))
             .env("HERDR_TEST_AGENTS", self.path("agents.json"))
             .env("CODEX_DELEGATE_RELAY", self.path("relay.sh"))
+            .env("CLAUDE_DELEGATE_RELAY", self.path("relay.sh"))
             .env("HERDR_CREW_NODE", "/bin/sh")
             .env("HERDR_CREW_ORCHESTRATOR_PID", "0")
             .env("HERDR_CREW_KILL_GRACE", "1")
@@ -450,18 +451,10 @@ fn outside_herdr_the_relay_runs_unchanged_with_no_view_and_no_herdr_calls() {
 }
 
 #[test]
-fn only_codex_is_a_delegate_and_a_missing_agent_is_explained() {
+fn only_codex_and_claude_are_delegates_and_a_missing_agent_is_explained() {
     let fixture = Fixture::new();
     let brief = fixture.brief("Do the thing");
     for envs in [vec![], vec![("HERDR_ENV", "0")]] {
-        let finished = fixture.run(&["--agent", "claude", "--brief", &brief], &envs);
-        assert_eq!(finished.code, Some(2));
-        assert!(
-            finished.stderr.contains("--agent claude is not supported"),
-            "{}",
-            finished.stderr
-        );
-        assert_eq!(finished.stdout, "");
         let finished = fixture.run(&["--agent", "gemini"], &envs);
         assert_eq!(finished.code, Some(2));
         assert!(finished.stderr.contains("unknown agent"));
@@ -999,4 +992,507 @@ fn a_termination_sent_to_the_wrapper_reaches_the_relay_and_its_exit_code_comes_b
     wait_until(|| fixture.calls_matching(CLEARED) == 1);
     thread::sleep(Duration::from_millis(400));
     assert_eq!(fixture.calls_matching(CLEARED), 1);
+}
+
+const CLAUDE_INIT: &str = r#"{"type":"system","subtype":"init","model":"claude-sonnet-5-5","session_id":"s-1","tools":[]}"#;
+const CLAUDE_HOOK: &str = r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup","session_id":"s-1"}"#;
+const CLAUDE_RATE_LIMIT: &str =
+    r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
+const CLAUDE_THOUGHT_AND_COMMAND: &str = r#"{"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[{"type":"thinking","thinking":"Weighing the options"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#;
+const CLAUDE_WITHHELD_THOUGHT: &str =
+    r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":""}]}}"#;
+const CLAUDE_COMMAND_FAILED: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"boom"}]}}"#;
+const CLAUDE_EDIT: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/repo/src/lib.rs"}}]}}"#;
+const CLAUDE_MESSAGE: &str =
+    r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Halfway there"}]}}"#;
+const CLAUDE_NESTED: &str = r#"{"type":"assistant","parent_tool_use_id":"t9","message":{"content":[{"type":"text","text":"from a nested subagent"}]}}"#;
+const CLAUDE_DONE: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"Added the command and its tests.","num_turns":3}"#;
+const CLAUDE_FAILED: &str = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"Hit the turn limit","num_turns":9}"#;
+
+#[test]
+fn a_claude_delegate_gets_the_relay_args_output_and_exit_code_unchanged() {
+    let fixture = Fixture::new();
+    let brief = fixture.brief("Do the thing");
+    let out = fixture.path("mine");
+    let out = out.to_str().unwrap();
+    let args = [
+        "--agent",
+        "claude",
+        "--title",
+        "short task",
+        "--brief",
+        &brief,
+        "--read-only",
+        "--max-turns",
+        "5",
+        "--out-dir",
+        out,
+        "--cd",
+        "/repo",
+    ];
+    let finished = fixture.run(&args, &[("FAKE_EXIT", "3")]);
+    assert_eq!(finished.code, Some(3));
+    assert_eq!(
+        finished.stdout,
+        format!(
+            "ARGS:[--brief][{brief}][--read-only][--max-turns][5][--out-dir][{out}][--cd][/repo]\n"
+        )
+    );
+    assert_eq!(finished.stderr, "relay-stderr\n");
+    assert!(fixture.path("mine/events.jsonl").exists());
+    assert_eq!(
+        json(&fixture.run_dirs().remove(0).join("child.json"))["kind"],
+        "claude"
+    );
+
+    // Without an out dir one is forced, and a valueless option is left for the relay to reject.
+    let fixture = Fixture::new();
+    let finished = fixture.run(
+        &["--agent", "claude", "--brief", &brief, "--max-budget-usd"],
+        &[],
+    );
+    let run_dir = fixture.run_dirs().remove(0);
+    assert_eq!(
+        finished.stdout,
+        format!(
+            "ARGS:[--out-dir][{}][--brief][{brief}][--max-budget-usd]\n",
+            run_dir.join("out").display()
+        )
+    );
+}
+
+#[test]
+fn the_claude_relay_is_found_through_its_own_variable_and_default_location() {
+    let fixture = Fixture::new();
+    let brief = fixture.brief("Do the thing");
+    // The Codex relay's variable has no say over a Claude delegate.
+    let finished = fixture.run(
+        &["--agent", "claude", "--brief", &brief],
+        &[("CODEX_DELEGATE_RELAY", "/nonexistent/relay.mjs")],
+    );
+    assert_eq!(finished.code, Some(0));
+
+    let missing = fixture.run(
+        &["--agent", "claude", "--brief", &brief],
+        &[("CLAUDE_DELEGATE_RELAY", "/nonexistent/relay.mjs")],
+    );
+    assert_eq!(missing.code, Some(2));
+    assert!(missing
+        .stderr
+        .contains("relay not found: /nonexistent/relay.mjs"));
+
+    let scripts = fixture.path(".claude/skills/claude-delegate/scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("relay.mjs"), "echo default-relay\n").unwrap();
+    let finished = fixture.run(
+        &["--agent", "claude", "--brief", &brief],
+        &[("CLAUDE_DELEGATE_RELAY", "")],
+    );
+    assert_eq!(finished.stdout, "default-relay\n");
+}
+
+#[test]
+fn outside_herdr_a_claude_relay_runs_unchanged_with_no_view_and_no_herdr_calls() {
+    let fixture = Fixture::new();
+    let brief = fixture.brief("Do the thing");
+    let out = fixture.path("mine");
+    let args = [
+        "--brief",
+        &brief,
+        "--out-dir",
+        out.to_str().unwrap(),
+        "--model",
+        "opus",
+    ];
+    let mut with_agent = vec!["--agent", "claude", "--title", "ignored"];
+    with_agent.extend(args);
+    let direct = Command::new("/bin/sh")
+        .arg(fixture.path("relay.sh"))
+        .args(args)
+        .env_clear()
+        .output()
+        .unwrap();
+    for envs in [vec![("HERDR_ENV", "0")], vec![("HERDR_PANE_ID", "")]] {
+        let finished = fixture.run(&with_agent, &envs);
+        assert_eq!(finished.code, direct.status.code());
+        assert_eq!(finished.stdout.as_bytes(), direct.stdout);
+        assert_eq!(finished.stderr.as_bytes(), direct.stderr);
+    }
+    assert!(!fixture.path("herdr.log").exists());
+    assert!(!fixture.path("state").exists());
+
+    let finished = fixture.run(&with_agent, &[("HERDR_ENV", "0"), ("FAKE_EXIT", "7")]);
+    assert_eq!(finished.code, Some(7));
+}
+
+#[test]
+fn a_claude_view_shows_the_brief_then_its_steps_then_the_result() {
+    let fixture = Fixture::new();
+    let brief = fixture.brief("Implement the delegate command\nsecond line of the brief");
+    let hold = fixture.hold("hold");
+    let first = fixture.events(
+        "first.jsonl",
+        &[
+            CLAUDE_HOOK,
+            CLAUDE_INIT,
+            CLAUDE_RATE_LIMIT,
+            CLAUDE_WITHHELD_THOUGHT,
+            CLAUDE_THOUGHT_AND_COMMAND,
+            CLAUDE_COMMAND_FAILED,
+            CLAUDE_NESTED,
+        ],
+    );
+    let second = fixture.events("second.jsonl", &[CLAUDE_EDIT, CLAUDE_MESSAGE, CLAUDE_DONE]);
+    let delegate = fixture.spawn(
+        &[
+            "--agent",
+            "claude",
+            "--title",
+            "fix login redirect bug",
+            "--model",
+            "claude-opus-5-5",
+            "--effort",
+            "high",
+            "--brief",
+            &brief,
+        ],
+        &[
+            ("FAKE_HOLD", &hold),
+            ("FAKE_EVENTS_1", &first),
+            ("FAKE_EVENTS_2", &second),
+            ("FAKE_FINAL", "Added the command and its tests."),
+        ],
+        None,
+    );
+    let run_dir = fixture.run_dir();
+    let open = fixture
+        .log()
+        .into_iter()
+        .find(|line| line.starts_with("plugin pane open"))
+        .unwrap();
+    assert!(open.contains(
+        "--plugin herdr-crew --entrypoint view --placement tab --workspace w1D --no-focus"
+    ));
+    assert!(fixture
+        .log()
+        .contains(&"tab rename tab-test opus-5.5 high: fix login redirect bug".to_owned()));
+    assert_eq!(json(&run_dir.join("child.json"))["kind"], "claude");
+
+    let mut view = fixture.view(&run_dir);
+    view.expect("Implement the delegate command");
+    view.expect("second line of the brief");
+    view.expect("note  session s-1");
+    view.expect("thought  Weighing the options");
+    view.expect("tool  Bash: cargo test");
+    view.expect("result  error: boom");
+    let text = view.text();
+    assert!(text.find("Brief").unwrap() < text.find("session s-1").unwrap());
+    assert!(!text.contains("status:"));
+    assert!(!text.contains("from a nested subagent"));
+    assert!(!text.contains("hook"));
+    // A withheld thought is not a step, and steps carry the time the view saw them.
+    assert_eq!(text.matches("thought").count(), 1);
+    assert!(!text.contains("--:--:--"), "{text}");
+
+    fs::remove_file(&hold).unwrap();
+    view.expect("✎ edit  Edit: /repo/src/lib.rs");
+    view.expect("message  Halfway there");
+    view.expect("status: completed");
+    view.expect("Added the command and its tests.");
+    let text = view.text();
+    assert!(text.find("Halfway there").unwrap() < text.find("status: completed").unwrap());
+    // The success result is shown once, as the result.
+    assert_eq!(text.matches("Added the command and its tests.").count(), 1);
+    view.expect_exit();
+    assert_eq!(delegate.finish().code, Some(0));
+}
+
+#[test]
+fn a_claude_tab_takes_its_model_from_the_run_when_the_caller_named_none() {
+    let fixture = Fixture::new();
+    let brief = fixture.brief("Port the wrapper");
+    let hold = fixture.hold("hold");
+    let events = fixture.events("events.jsonl", &[CLAUDE_INIT]);
+    let delegate = fixture.spawn(
+        &[
+            "--agent",
+            "claude",
+            "--title",
+            "port wrapper",
+            "--brief",
+            &brief,
+        ],
+        &[
+            ("FAKE_HOLD", &hold),
+            ("FAKE_EVENTS_1", &events),
+            ("FAKE_EFFORT_JSON", "\"low\""),
+        ],
+        None,
+    );
+    let run_dir = fixture.run_dir();
+    assert!(fixture
+        .log()
+        .contains(&"tab rename tab-test claude: port wrapper".to_owned()));
+    let mut view = fixture.view(&run_dir);
+    view.expect("note  session s-1");
+    wait_until(|| {
+        fixture
+            .log()
+            .contains(&"tab rename tab-test sonnet-5.5: port wrapper".to_owned())
+    });
+    // A lane's effort is only known from the result.
+    fs::remove_file(&hold).unwrap();
+    wait_until(|| {
+        fixture
+            .log()
+            .contains(&"tab rename tab-test sonnet-5.5 low: port wrapper".to_owned())
+    });
+    view.expect_exit();
+    delegate.finish();
+
+    // The first words of the brief name a run with neither title nor model.
+    let fixture = Fixture::new();
+    let brief = fixture.brief("Port the wrapper\ninto Rust");
+    fixture.run(&["--agent", "claude", "--brief", &brief], &[]);
+    assert!(fixture
+        .log()
+        .contains(&"tab rename tab-test claude: Port the wrapper".to_owned()));
+}
+
+#[test]
+fn every_way_a_claude_run_can_end_has_its_status() {
+    // An error result: the relay's error says so, and Claude says why.
+    let fixture = Fixture::new();
+    let brief = fixture.brief("Do it");
+    let events = fixture.events("failure.jsonl", &[CLAUDE_INIT, CLAUDE_FAILED]);
+    fixture.run(
+        &["--agent", "claude", "--brief", &brief],
+        &[
+            ("FAKE_STATUS", "failed"),
+            (
+                "FAKE_ERROR_JSON",
+                "\"claude returned an error result (error_max_turns)\"",
+            ),
+            ("FAKE_EXIT", "1"),
+            ("FAKE_EVENTS_1", &events),
+            ("FAKE_FINAL", "Hit the turn limit"),
+        ],
+    );
+    let mut view = fixture.view(&fixture.run_dir());
+    view.expect("error  Hit the turn limit");
+    view.expect("status: failed");
+    view.expect("claude returned an error result (error_max_turns): Hit the turn limit");
+    view.expect_exit();
+
+    for (status, error, exit, expected, text) in [
+        (
+            "timeout",
+            "\"claude did not finish within --timeout 1m\"",
+            "124",
+            "status: failed",
+            "claude did not finish within",
+        ),
+        (
+            "claude_unavailable",
+            "\"spawn claude ENOENT\"",
+            "127",
+            "status: failed",
+            "spawn claude ENOENT",
+        ),
+        (
+            "aborted",
+            "\"the relay was killed by SIGTERM\"",
+            "143",
+            "status: killed",
+            "the relay was killed by SIGTERM",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let brief = fixture.brief("Do it");
+        fixture.run(
+            &["--agent", "claude", "--brief", &brief],
+            &[
+                ("FAKE_STATUS", status),
+                ("FAKE_ERROR_JSON", error),
+                ("FAKE_EXIT", exit),
+            ],
+        );
+        let mut view = fixture.view(&fixture.run_dir());
+        view.expect(expected);
+        view.expect(text);
+        view.expect_exit();
+    }
+
+    // A relay that vanished without a result is killed, unless Claude reported an error.
+    let fixture = Fixture::new();
+    fixture.run(
+        &["--agent", "claude", "--brief", &brief],
+        &[("FAKE_NO_RESULT", "1"), ("FAKE_EXIT", "1")],
+    );
+    let mut view = fixture.view(&fixture.run_dir());
+    view.expect("status: killed");
+    view.expect("The relay ended without writing a result");
+    view.expect_exit();
+
+    let fixture = Fixture::new();
+    fixture.run(
+        &["--agent", "claude", "--brief", &brief],
+        &[
+            ("FAKE_NO_RESULT", "1"),
+            ("FAKE_EXIT", "1"),
+            ("FAKE_EVENTS_1", &events),
+        ],
+    );
+    let mut view = fixture.view(&fixture.run_dir());
+    view.expect("status: failed");
+    view.expect("Hit the turn limit");
+    view.expect_exit();
+}
+
+#[test]
+fn the_pane_shows_a_claude_delegate_while_it_runs_and_is_cleared_when_it_ends() {
+    let fixture = Fixture::new();
+    let brief = fixture.brief("Do it");
+    let hold = fixture.hold("hold");
+    let delegate = fixture.spawn(
+        &["--agent", "claude", "--brief", &brief],
+        &[("FAKE_HOLD", &hold)],
+        None,
+    );
+    wait_until(|| fixture.calls_matching(SET) == 1);
+    let log = fixture.log();
+    assert!(log.iter().any(|line| line.starts_with(
+        "pane report-agent w1D:p1 --source herdr-crew --agent claude --state working"
+    )));
+    assert!(log.iter().any(|line| line.starts_with(
+        "pane report-metadata w1D:p1 --source herdr-crew --display-agent claude ⇠ claude --token "
+    )));
+    assert_eq!(fixture.calls_matching(CLEARED), 0);
+    fs::remove_file(&hold).unwrap();
+    delegate.finish();
+    assert_eq!(fixture.calls_matching(CLEARED), 1);
+    assert_eq!(fixture.calls_matching("--state idle"), 1);
+    assert!(fixture
+        .log()
+        .last()
+        .unwrap()
+        .ends_with("--clear-display-agent --clear-token delegate"));
+
+    // A pane that hosts a detected agent only gets the label and token.
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.path("agents.json"),
+        r#"{"result":{"agents":[{"pane_id":"w1D:p1","agent":"claude"}]}}"#,
+    )
+    .unwrap();
+    fixture.run(&["--agent", "claude", "--brief", &brief], &[]);
+    assert_eq!(fixture.calls_matching("display-agent claude ⇠ claude"), 1);
+    assert_eq!(fixture.calls_matching(CLEARED), 1);
+    assert_eq!(fixture.calls_matching("report-agent"), 0);
+
+    // Codex delegates keep their own label.
+    let fixture = Fixture::new();
+    fixture.run(&["--agent", "codex", "--brief", &brief], &[]);
+    assert_eq!(fixture.calls_matching("display-agent codex ⇠ claude"), 1);
+    assert_eq!(fixture.calls_matching("claude ⇠ claude"), 0);
+}
+
+#[test]
+fn a_claude_delegates_pane_is_cleared_after_the_wrapper_is_killed() {
+    let mut fixture = Fixture::new();
+    let brief = fixture.brief("Do it");
+    let hold = fixture.hold("hold");
+    let pidfile = fixture.path("relay.pid");
+    let mut delegate = fixture.spawn(
+        &["--agent", "claude", "--brief", &brief],
+        &[
+            ("FAKE_HOLD", &hold),
+            ("FAKE_PIDFILE", pidfile.to_str().unwrap()),
+        ],
+        None,
+    );
+    let relay = read_pid(&pidfile);
+    fixture.track(relay);
+    let run_dir = fixture.run_dir();
+    let mut view = fixture.view(&run_dir);
+    view.expect("Do it");
+    delegate.child.kill().unwrap();
+    delegate.child.wait().unwrap();
+    // The relay carries on unattended, and the pane keeps saying so.
+    thread::sleep(Duration::from_millis(800));
+    assert!(alive(relay));
+    assert_eq!(fixture.calls_matching(CLEARED), 0);
+    assert!(!view.text().contains("status:"));
+    fs::remove_file(&hold).unwrap();
+    wait_until(|| fixture.calls_matching(CLEARED) == 1);
+    assert!(!alive(relay));
+    assert_eq!(fixture.calls_matching("release-agent"), 1);
+    view.expect("status: completed");
+    view.expect_exit();
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(fixture.calls_matching(CLEARED), 1);
+}
+
+#[test]
+fn a_claude_delegate_is_stopped_when_the_orchestrators_session_closes() {
+    let mut fixture = Fixture::new();
+    let brief = fixture.brief("Do it");
+    let hold = fixture.hold("hold");
+    let (pidfile, grandchild) = (fixture.path("relay.pid"), fixture.path("grandchild.pid"));
+    let mut orchestrator = Command::new("sleep").arg("60").spawn().unwrap();
+    let delegate = fixture.spawn(
+        &["--agent", "claude", "--brief", &brief],
+        &[
+            (
+                "HERDR_CREW_ORCHESTRATOR_PID",
+                &orchestrator.id().to_string(),
+            ),
+            ("FAKE_HOLD", &hold),
+            ("FAKE_IGNORE_TERM", "1"),
+            ("FAKE_PIDFILE", pidfile.to_str().unwrap()),
+            ("FAKE_GRANDCHILD", grandchild.to_str().unwrap()),
+        ],
+        None,
+    );
+    let relay = read_pid(&pidfile);
+    let leftover = read_pid(&grandchild);
+    fixture.track(relay);
+    fixture.track(leftover);
+    thread::sleep(Duration::from_millis(600));
+    assert!(alive(relay) && alive(leftover));
+    orchestrator.kill().unwrap();
+    orchestrator.wait().unwrap();
+    wait_until(|| !alive(relay) && !alive(leftover));
+    assert_eq!(delegate.finish().code, Some(128 + 9));
+    wait_until(|| fixture.calls_matching(CLEARED) == 1);
+}
+
+#[test]
+fn a_claude_relay_that_stops_politely_reports_aborted_to_the_view() {
+    let mut fixture = Fixture::new();
+    let brief = fixture.brief("Do it");
+    let hold = fixture.hold("hold");
+    let pidfile = fixture.path("relay.pid");
+    let mut orchestrator = Command::new("sleep").arg("60").spawn().unwrap();
+    let delegate = fixture.spawn(
+        &["--agent", "claude", "--brief", &brief],
+        &[
+            (
+                "HERDR_CREW_ORCHESTRATOR_PID",
+                &orchestrator.id().to_string(),
+            ),
+            ("FAKE_HOLD", &hold),
+            ("FAKE_ABORT_ON_TERM", "1"),
+            ("FAKE_PIDFILE", pidfile.to_str().unwrap()),
+        ],
+        None,
+    );
+    fixture.track(read_pid(&pidfile));
+    let mut view = fixture.view(&fixture.run_dir());
+    view.expect("Do it");
+    orchestrator.kill().unwrap();
+    orchestrator.wait().unwrap();
+    view.expect("status: killed");
+    view.expect_exit();
+    assert_eq!(delegate.finish().code, Some(143));
 }
