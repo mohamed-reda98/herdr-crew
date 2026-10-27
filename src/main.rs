@@ -2,6 +2,7 @@ mod herdr;
 mod hooks;
 mod install;
 mod naming;
+mod process;
 mod render;
 mod state;
 mod transcript;

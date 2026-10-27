@@ -1,4 +1,4 @@
-use crate::{herdr, naming, state, Result};
+use crate::{herdr, naming, process::Process, state, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -19,6 +19,21 @@ struct Input {
     agent_type: String,
     #[serde(default)]
     agent_transcript_path: Option<PathBuf>,
+    #[serde(default, deserialize_with = "report_text")]
+    last_assistant_message: Option<String>,
+    #[serde(default)]
+    orchestrator: Option<Process>,
+}
+
+// The payload travels as one argument, which the kernel caps; a stop must not be lost to a long report.
+const REPORT_LIMIT: usize = 16_000;
+
+fn report_text<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Ok(Value::deserialize(deserializer)?
+        .as_str()
+        .map(|text| text.chars().take(REPORT_LIMIT).collect()))
 }
 
 impl Input {
@@ -66,8 +81,9 @@ pub fn receive(args: &[String]) -> Result<()> {
     };
     let mut bytes = Vec::new();
     io::stdin().take(16 * 1024 * 1024).read_to_end(&mut bytes)?;
-    let input: Input = serde_json::from_slice(&bytes)?;
+    let mut input: Input = serde_json::from_slice(&bytes)?;
     input.validate(action)?;
+    input.orchestrator = crate::process::orchestrator();
     spawn_dispatch(action, &serde_json::to_string(&input)?)
 }
 
@@ -105,6 +121,7 @@ pub fn dispatch(action: &str, payload: &str) -> Result<()> {
                 transcript: input
                     .agent_transcript_path
                     .filter(|path| path.is_absolute()),
+                message: input.last_assistant_message,
             },
         ),
         _ => unreachable!(),
@@ -130,6 +147,7 @@ fn open_view(input: &Input, child_dir: &Path) -> Result<()> {
                 agent_id: input.agent_id.clone(),
                 agent_type: input.agent_type.clone(),
                 transcript: input.transcript(),
+                orchestrator: input.orchestrator,
             },
         )?;
         open_tab(input, child_dir)

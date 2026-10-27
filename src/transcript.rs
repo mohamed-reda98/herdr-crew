@@ -1,6 +1,6 @@
 use crate::{
     naming, state,
-    view::{Step, StepKind, StepSource, Update},
+    view::{Ending, Step, StepKind, StepSource, Update},
 };
 use serde_json::Value;
 use std::{
@@ -18,6 +18,7 @@ pub struct ClaudeTranscript {
     model: Option<String>,
     effort: Option<String>,
     description: Option<String>,
+    ending: Option<Ending>,
 }
 
 impl ClaudeTranscript {
@@ -31,6 +32,7 @@ impl ClaudeTranscript {
             model: None,
             effort: None,
             description: None,
+            ending: None,
         }
     }
 
@@ -108,14 +110,24 @@ impl ClaudeTranscript {
                 self.brief_seen = true;
                 vec![Update::Brief(text_content(content))]
             }
-            Some("assistant") if self.brief_seen => assistant_steps(line, content),
-            Some("user") => tool_results(line, content),
+            Some("assistant") if self.brief_seen => {
+                self.ending = assistant_ending(line, content);
+                assistant_steps(line, content)
+            }
+            Some("user") => {
+                self.ending = user_ending(content);
+                tool_results(line, content)
+            }
             _ => Vec::new(),
         }
     }
 }
 
 impl StepSource for ClaudeTranscript {
+    fn ending(&self) -> Option<Ending> {
+        self.ending.clone()
+    }
+
     fn poll(&mut self) -> io::Result<Vec<Update>> {
         self.open()?;
         let mut updates = Vec::new();
@@ -134,6 +146,31 @@ impl StepSource for ClaudeTranscript {
         }
         Ok(updates)
     }
+}
+
+// Best effort: Claude Code marks a failed model call as an assistant line, not as a separate event.
+fn assistant_ending(line: &Value, content: &Value) -> Option<Ending> {
+    let text = text_content(content);
+    if line["isApiErrorMessage"] == true || !line["error"].is_null() {
+        let reason = line["error"].as_str().unwrap_or("the model call failed");
+        let text = if text.trim().is_empty() {
+            reason
+        } else {
+            &text
+        };
+        return Some(Ending::Error(text.to_owned()));
+    }
+    // A line that goes on to use a tool is mid-work, not a final report.
+    let uses_tool = content
+        .as_array()
+        .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_use"));
+    (!uses_tool && !text.trim().is_empty()).then_some(Ending::Report(text))
+}
+
+fn user_ending(content: &Value) -> Option<Ending> {
+    text_content(content)
+        .starts_with("[Request interrupted by user")
+        .then_some(Ending::Interrupted)
 }
 
 fn text_content(content: &Value) -> String {
