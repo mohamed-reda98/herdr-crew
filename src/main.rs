@@ -1,5 +1,7 @@
+mod herdr;
 mod hooks;
 mod install;
+mod naming;
 mod render;
 mod state;
 mod transcript;

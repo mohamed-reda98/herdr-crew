@@ -222,6 +222,36 @@ fn line(agent: &str, kind: &str, content: Value) -> String {
     )
 }
 
+fn assistant(agent: &str, extra: Value) -> String {
+    let mut line: Value = serde_json::from_str(&line(
+        agent,
+        "assistant",
+        json!([{"type":"text", "text":"A step"}]),
+    ))
+    .unwrap();
+    for (key, value) in extra.as_object().unwrap() {
+        line[key] = value.clone();
+    }
+    format!("{line}\n")
+}
+
+fn start(fixture: &Fixture, agent: &str) {
+    assert_silent_success(&fixture.hook("subagent-start", &fixture.input(agent, "SubagentStart")));
+    wait_until(|| fixture.child_dir(agent).join("tab.json").exists());
+}
+
+fn renames(fixture: &Fixture) -> Vec<String> {
+    fixture
+        .calls()
+        .into_iter()
+        .filter(|args| args[..2] == ["tab", "rename"])
+        .map(|args| {
+            assert_eq!(args[2], "tab-test");
+            args[3].clone()
+        })
+        .collect()
+}
+
 fn finish(fixture: &Fixture, agent: &str) {
     assert_silent_success(&fixture.hook("subagent-stop", &fixture.input(agent, "SubagentStop")));
     wait_until(|| fixture.child_dir(agent).join("stop.json").exists());
@@ -274,7 +304,7 @@ fn start_opens_a_tab_without_focus_and_does_not_wait_for_herdr() {
     );
     assert!(calls
         .iter()
-        .any(|args| args == &["tab", "rename", "tab-test", "⇢ sub: general-purpose"]));
+        .any(|args| args == &["tab", "rename", "tab-test", "sub: general-purpose"]));
     let record: Value =
         serde_json::from_slice(&fs::read(fixture.child_dir("child-1").join("child.json")).unwrap())
             .unwrap();
@@ -781,4 +811,103 @@ fn state_uses_xdg_then_home_and_creates_private_records() {
             .count()
             == 2
     });
+}
+
+#[test]
+fn view_renames_the_tab_once_model_and_effort_are_known() {
+    let fixture = Fixture::new();
+    let transcript = fixture.transcript("child");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(
+        transcript.with_extension("meta.json"),
+        json!({"agentType":"general-purpose", "description":"Research: hydraulic press brief"})
+            .to_string(),
+    )
+    .unwrap();
+    start(&fixture, "child");
+    assert_eq!(renames(&fixture), ["sub: Research: hydraulic press"]);
+    let view = fixture.view("child");
+    append(
+        &transcript,
+        line("child", "user", json!("Synthetic brief")).as_bytes(),
+    );
+    view.expect("Synthetic brief");
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(renames(&fixture).len(), 1);
+    append(
+        &transcript,
+        assistant(
+            "child",
+            json!({"effort":"high", "perTurnEffort":"low", "requestedModel":"claude-sonnet-5-5",
+                "message":{"model":"claude-opus-5-5[1m]", "content":[{"type":"text", "text":"A step"}]}}),
+        )
+        .as_bytes(),
+    );
+    wait_until(|| renames(&fixture).len() == 2);
+    assert!(renames(&fixture).contains(&"opus-5.5 high: Research: hydraulic press".to_owned()));
+    // Later steps with the same details must not rename again.
+    append(
+        &transcript,
+        assistant("child", json!({"effort":"high"})).as_bytes(),
+    );
+    view.expect("A step");
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(renames(&fixture).len(), 2);
+}
+
+#[test]
+fn details_missing_at_first_are_filled_in_when_they_appear() {
+    let fixture = Fixture::new();
+    let transcript = fixture.transcript("child");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    start(&fixture, "child");
+    assert_eq!(renames(&fixture), ["sub: general-purpose"]);
+    let mut view = fixture.view("child");
+    append(
+        &transcript,
+        line("child", "user", json!("Synthetic brief")).as_bytes(),
+    );
+    view.expect("Synthetic brief");
+    // Only the requested model is known, and no effort.
+    append(
+        &transcript,
+        assistant("child", json!({"requestedModel":"claude-haiku-5-5"})).as_bytes(),
+    );
+    wait_until(|| renames(&fixture).contains(&"haiku-5.5: general-purpose".to_owned()));
+    // The description arrives after the child started.
+    fs::write(
+        transcript.with_extension("meta.json"),
+        json!({"description":"find ledger query now please"}).to_string(),
+    )
+    .unwrap();
+    wait_until(|| renames(&fixture).contains(&"haiku-5.5: find ledger query".to_owned()));
+    // The effort falls back to the per-turn one when it shows up.
+    append(
+        &transcript,
+        assistant("child", json!({"perTurnEffort":"medium"})).as_bytes(),
+    );
+    wait_until(|| renames(&fixture).contains(&"haiku-5.5 medium: find ledger query".to_owned()));
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(renames(&fixture).len(), 4);
+    finish(&fixture, "child");
+    view.expect_exit();
+}
+
+#[test]
+fn a_view_without_a_recorded_tab_never_renames() {
+    let fixture = Fixture::new();
+    fixture.prepare_child("child");
+    let mut view = fixture.view("child");
+    append(
+        &fixture.transcript("child"),
+        assistant(
+            "child",
+            json!({"effort":"high", "requestedModel":"claude-opus-5-5"}),
+        )
+        .as_bytes(),
+    );
+    thread::sleep(Duration::from_millis(150));
+    assert!(renames(&fixture).is_empty());
+    finish(&fixture, "child");
+    view.expect_exit();
 }

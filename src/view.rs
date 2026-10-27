@@ -1,4 +1,4 @@
-use crate::{render::Renderer, state, transcript::ClaudeTranscript, Result};
+use crate::{naming::Namer, render::Renderer, state, transcript::ClaudeTranscript, Result};
 use std::{env, io, path::PathBuf, thread, time::Duration};
 
 pub enum Update {
@@ -29,6 +29,7 @@ pub fn run() -> Result<()> {
     let child_dir =
         PathBuf::from(env::var_os("HERDR_CREW_CHILD_DIR").ok_or("missing child directory")?);
     let child: state::Child = state::read_json(&child_dir.join("child.json"))?;
+    let mut namer = Namer::new(&child_dir, child.agent_type);
     let mut source = ClaudeTranscript::new(child.transcript, child.agent_id);
     let mut renderer = Renderer::new(io::stdout());
     let linger = Duration::from_millis(
@@ -48,6 +49,7 @@ pub fn run() -> Result<()> {
             renderer.write(update)?;
         }
         renderer.flush()?;
+        namer.refresh(&mut source);
         if let Some(stop) = stop {
             let elapsed =
                 Duration::from_millis(state::epoch_ms().saturating_sub(stop.stopped_at_ms));

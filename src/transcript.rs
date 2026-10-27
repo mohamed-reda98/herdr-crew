@@ -1,5 +1,5 @@
 use crate::{
-    state,
+    naming, state,
     view::{Step, StepKind, StepSource, Update},
 };
 use serde_json::Value;
@@ -15,6 +15,9 @@ pub struct ClaudeTranscript {
     reader: Option<BufReader<File>>,
     pending: Vec<u8>,
     brief_seen: bool,
+    model: Option<String>,
+    effort: Option<String>,
+    description: Option<String>,
 }
 
 impl ClaudeTranscript {
@@ -25,6 +28,9 @@ impl ClaudeTranscript {
             reader: None,
             pending: Vec::new(),
             brief_seen: false,
+            model: None,
+            effort: None,
+            description: None,
         }
     }
 
@@ -40,6 +46,40 @@ impl ClaudeTranscript {
             .ok()
             .and_then(|meta| meta.get("finished").and_then(Value::as_bool))
             .unwrap_or(false)
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    pub fn effort(&self) -> Option<&str> {
+        self.effort.as_deref()
+    }
+
+    /// The orchestrator may write the description just after the child starts.
+    pub fn load_description(&mut self) {
+        if self.description.is_none() {
+            self.description = naming::read_description(&self.path);
+        }
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    fn note_details(&mut self, line: &Value) {
+        let first = |keys: [&Value; 2]| {
+            keys.into_iter()
+                .filter_map(Value::as_str)
+                .find(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+        };
+        if self.model.is_none() {
+            self.model = first([&line["message"]["model"], &line["requestedModel"]]);
+        }
+        if self.effort.is_none() {
+            self.effort = first([&line["effort"], &line["perTurnEffort"]]);
+        }
     }
 
     fn open(&mut self) -> io::Result<()> {
@@ -58,6 +98,9 @@ impl ClaudeTranscript {
             || line.get("agentId").and_then(Value::as_str) != Some(&self.agent_id)
         {
             return Vec::new();
+        }
+        if line["type"] == "assistant" {
+            self.note_details(line);
         }
         let content = &line["message"]["content"];
         match line["type"].as_str() {

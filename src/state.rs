@@ -17,6 +17,12 @@ pub struct Child {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct Tab {
+    pub tab_id: String,
+    pub name: String,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct Stop {
     pub stopped_at_ms: u64,
     pub transcript: Option<PathBuf>,

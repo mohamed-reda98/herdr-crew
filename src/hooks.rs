@@ -1,4 +1,4 @@
-use crate::{render, state, Result};
+use crate::{herdr, naming, state, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -140,12 +140,6 @@ fn open_view(input: &Input, child_dir: &Path) -> Result<()> {
     opened
 }
 
-fn herdr() -> Command {
-    let mut command = Command::new(env::var_os("HERDR_BIN").unwrap_or_else(|| "herdr".into()));
-    command.stdin(Stdio::null()).stderr(Stdio::null());
-    command
-}
-
 fn workspace() -> Result<String> {
     if let Ok(workspace) = env::var("HERDR_WORKSPACE_ID") {
         if !workspace.is_empty() {
@@ -161,7 +155,7 @@ fn workspace() -> Result<String> {
 }
 
 fn open_tab(input: &Input, child_dir: &Path) -> Result<()> {
-    let mut command = herdr();
+    let mut command = herdr::command();
     command.args([
         "plugin",
         "pane",
@@ -196,15 +190,22 @@ fn open_tab(input: &Input, child_dir: &Path) -> Result<()> {
             .pointer("/result/plugin_pane/pane/tab_id")
             .and_then(Value::as_str)
         {
-            let _ = herdr()
-                .args(["tab", "rename", tab_id, &tab_name(&input.agent_type)])
-                .stdout(Stdio::null())
-                .status();
+            let name = naming::tab_name(
+                None,
+                None,
+                naming::read_description(&input.transcript()).as_deref(),
+                &input.agent_type,
+            );
+            naming::rename(tab_id, &name);
+            // Recorded after the rename so the view only ever renames on top of it.
+            state::write_json(
+                &child_dir.join("tab.json"),
+                &state::Tab {
+                    tab_id: tab_id.to_owned(),
+                    name,
+                },
+            )?;
         }
     }
     Ok(())
-}
-
-fn tab_name(agent_type: &str) -> String {
-    format!("⇢ sub: {}", render::one_line(agent_type, 80))
 }
